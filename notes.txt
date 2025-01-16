@@ -1,0 +1,62 @@
+Nodes in the Workflow
+Student Submission (PDF): The starting point where students upload their homework.
+OCR and Preprocessing Agent: Extracts text from PDFs, including OCR for handwritten inputs.
+Question Splitting Agent: Splits extracted text into individual questions and matches with the solution key.
+RAG Agent (Retrieve Solution Key): Retrieves the instructor's solution key for comparison.
+Grading Agent 1-5: Independently grade student answers and provide comments.
+Reflection Agent: Analyzes the graded answers, verifies quality, and reroutes for regrading if needed.
+Insights and Solution Agent: Identifies weak points in answers and prepares personalized notes or solutions.
+Reporting Agent: Compiles grades and comments into an Excel sheet.
+Notification Agent: Sends grades and feedback to students via email.
+Agents and Their Roles
+OCR and Preprocessing Agent:
+
+Converts typed or handwritten answers into plain text using OCR tools.
+Tools: Tesseract OCR, PyPDF2, pdfplumber.
+Question Splitting Agent:
+
+Identifies and separates questions and answers from the processed text.
+Tools: spaCy, transformers (e.g., GPT).
+RAG Agent:
+
+Retrieves the solution key from a database or document for grading purposes.
+Tools: LangChain, vector databases like Pinecone or Chroma.
+Grading Agents (5 identical):
+
+Grades each question independently against the solution key.
+Tools: GPT-4, fine-tuned models for evaluation.
+Reflection Agent:
+
+Ensures quality control by analyzing graded answers and rerouting unsatisfactory grades.
+Tools: Rule-based logic, GPT for validation.
+Insights and Solution Agent:
+
+Focuses on areas where the student struggled and provides detailed notes or explanations.
+Tools: LangChain, knowledge retrieval systems.
+Reporting Agent:
+
+Generates a structured Excel sheet containing grades and comments for each student.
+Tools: Pandas, openpyxl.
+Notification Agent:
+
+Emails the grades and feedback to students.
+Tools: smtplib, SendGrid, Gmail API.
+Tools Overview
+OCR and Text Extraction:
+
+Tesseract OCR, PyPDF2, pdfplumber.
+Natural Language Processing:
+
+spaCy, transformers (Hugging Face), GPT-based models.
+Knowledge Retrieval:
+
+LangChain, Pinecone, FAISS, Chroma.
+Data Handling:
+
+Pandas, openpyxl (for Excel reports).
+Email Automation:
+
+smtplib, Gmail API, SendGrid.
+Grading Logic:
+
+OpenAI GPT (for comparison and scoring), customizable rubrics.
