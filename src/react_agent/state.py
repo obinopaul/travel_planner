@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, List, Dict, Sequence, Annotated
 from langchain.schema import BaseMessage
 import operator
+from datetime import date
 
 
 @dataclass  
@@ -22,9 +23,9 @@ class InputState:
     This class is used to define the initial state and structure of incoming data.
     """
 
-    messages: Annotated[Sequence[AnyMessage], add_messages] = field(
-        default_factory=list
-    )
+    messages: Annotated[list[BaseMessage], add_messages] = field(default_factory=list)
+    "Stores the sequence of messages exchanged between the user and the agent."
+    
     """
     Messages tracking the primary execution state of the agent.
 
@@ -44,81 +45,49 @@ class InputState:
 
 
 @dataclass
-class OverallState(InputState):
-    # Student Information
-    """Represents the complete state of the grading process, including intermediate and final results."""
-    student_name: str = field(default=None)
-    "Name of the student."
-    student_email: str = field(default=None)
-    "Email address of the student."
-    student_id: str = field(default=None)
-    "Unique identifier for the student."
-    phone_number: str = field(default=None)
-    "Phone number of the student."
-    
-    # Assignment Information
-    course_name: str = field(default=None)
-    "Name of the course."
-    course_number: str = field(default=None)
-    "Course number or code."
-    assignment_name: str = field(default=None)
-    "Name of the assignment."
-    file_path: str = field(default=None)
-    
-    # Grading Information
-    student_grades: Dict[str, float] = field(default_factory=dict)
-    "Dictionary of grades for each question or section of the assignment."
-    scores: List[Dict[str, Any]] = field(default_factory=list)
-    "List of Dictionary of actual scores for each question or section of the assignment."
-    solution_key: Dict[str, Any] = field(default_factory=dict)
-    "Solution key containing correct answers and scoring details."
-    student_submission: Optional[str] = field(default=None)
-    "The student's solution to the question."
-    feedback_comments: List[str] = field(default_factory=list)
-    "List of feedback comments for the student's submission."
-    reflection: Optional[str] = field(default=None)
-    "Reflection or analysis provided by the reflection agent."
-    
-    # State Management
-    is_satisfactory: bool = field(default=None)
-    "True if all required fields are well populated, False otherwise."
-    reflection_steps_taken: int = field(default=0)
-    "Number of times the reflection node has been executed."
-    is_last_step: bool = field(default=False)
-    "Indicates whether the current step is the last one before the graph raises an error."
-    intermediate_results: Dict[str, Any] = field(default_factory=dict)
-    "Dictionary to store intermediate results during the grading process."
-    final_output: Dict[str, Any] = field(default_factory=dict)
-    "Dictionary to store the final output of the grading process."
+class OverallState:
     
     # Agent Workflow Tracking
-    messages: Annotated[Sequence[BaseMessage], operator.add] = field(default_factory=list)
+    messages: Annotated[list[BaseMessage], add_messages] = field(default_factory=list)
     "Stores the sequence of messages exchanged between the user and the agent."
-    search_queries: List[str] = field(default_factory=list)
-    "List of generated search queries to find relevant information."
+    location: Optional[str] = None
+    "The user's current location or starting point."
+    destination: Optional[str] = None
+    "The destination the user wants to travel to."
+    budget: Optional[float] = None
+    "The user's travel budget in their chosen currency."
+    start_date: Optional[date] = None
+    "The start date of the trip."
+    end_date: Optional[date] = None
+    "The end date of the trip."
+    num_adults: Optional[int] = None
+    "The number of adults traveling."
+    num_children: Optional[int] = None
+    "The number of children traveling."
+    num_rooms: Optional[int] = None
+    "The number of rooms required for accommodation."
+    
+    # User Preferences
+    user_preferences: Dict[str, Any] = field(default_factory=dict)
+    "Stores the user's input (e.g., destination, budget, dates)."
+    
+    # Agent Outputs
+    flights: Optional[List[Dict[str, Any]]] = None
+    "Stores the flight options found by the Flight Finder agent."
+    accommodation: Optional[List[Dict[str, Any]]] = None
+    "Stores the accommodation options found by the Accommodation Finder agent (hotels, Airbnb, hostels, etc.)."
+    activities: Optional[List[Dict[str, Any]]] = None
+    "Stores the activity options found by the Activity Planner agent."
+    recommendations: Optional[Dict[str, Any]] = None
+    "Stores recommendations from the Real-Time Data Provider agent (e.g., car rental, weather, crime rates)."
+    warnings: Optional[Dict[str, Any]] = None
+    "Stores warnings from the Real-Time Data Provider agent (e.g., high crime areas, visa requirements)."
+    itinerary: Optional[Dict[str, Any]] = None
+    "Stores the final travel itinerary generated by the Itinerary Generator agent."
+     
     
 @dataclass
 class OutputState:
     """Represents the final output state to be returned to the user or system."""
-    student_name: str
-    "Name of the student."
-    student_email: str
-    "Email address of the student."
-    student_id: str
-    "Unique identifier for the student."
-    course_name: str
-    "Name of the course."
-    course_number: str
-    "Course number or code."
-    assignment_name: str
-    "Name of the assignment."
-    student_grades: Dict[str, float]
-    "Dictionary of grades for each question or section of the assignment."
-    scores: Dict[str, float]
-    "Dictionary of Actual scores for each question or section of the assignment."
-    feedback_comments: List[str]
-    "List of feedback comments for the student's submission."
-    reflection: str
-    "Reflection or analysis provided by the reflection agent."
-    is_satisfactory: bool
-    "True if all required fields are well populated, False otherwise."
+    messages: Annotated[list[BaseMessage], add_messages] = field(default_factory=list)
+    "Stores the sequence of messages exchanged between the user and the agent."

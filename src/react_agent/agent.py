@@ -11,22 +11,39 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.graph import StateGraph
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langchain_openai import ChatOpenAI as LangchainChatDeepSeek
-from langchain_core.messages import HumanMessage, SystemMessage, MessagesPlaceholder
-from langchain.agents import create_react_agent
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.prompts import MessagesPlaceholder
+from langchain.agents import create_react_agent, AgentExecutor
 from langgraph.prebuilt import ToolNode
 from typing import Dict, List, Literal, Any
-from react_agent.state import OverallState
+import ipywidgets as widgets
+from IPython.display import display
+from src.react_agent.state import OverallState
 import os 
-from langchain_core.pydantic_v1 import BaseModel, Field
+import json
+from datetime import date
+from pydantic import BaseModel, Field
 
-from react_agent.configuration import Configuration
-from react_agent.state import InputState, OverallState, OutputState
-from react_agent.prompts import PERSONAL_INFO_PROMPT
-from react_agent.tools import TOOLS, split_pdf_tool, search_tool, advanced_ocr_tool, retrieve_solution_key_tool
-from react_agent.utils import load_chat_model
- 
+from langchain.tools import BaseTool, Tool
+from langchain_core.runnables import Runnable
+from src.react_agent.configuration import Configuration
+from src.react_agent.state import InputState, OverallState, OutputState
+from src.react_agent.prompts import PERSONAL_INFO_PROMPT, USER_PROMPT
+from src.react_agent.tools import (TOOLS, AmadeusFlightSearchInput, AmadeusFlightSearchTool, 
+                                   AmadeusHotelSearchTool, AmadeusHotelSearchInput,
+                                   GeoapifyPlacesSearchTool, GeoapifyPlacesSearchInput,
+                                   WeatherSearchTool, WeatherSearchInput,
+                                   GoogleFlightsSearchTool, FlightSearchInput, 
+                                   GoogleScholarSearchTool, GoogleScholarSearchInput,
+                                   BookingScraperTool, BookingSearchInput,
+                                   tavily_search_tool, google_places_tool, google_find_place_tool, google_place_details_tool,
+                                   )
+from src.react_agent.utils import load_chat_model
+from langchain.agents import create_react_agent, AgentExecutor
+from langchain_core.tools import tool
+
 # Define the function that calls the model
 
 #-----------------------------------------------LLM------------------------------------------------
@@ -37,67 +54,442 @@ llm = LangchainChatDeepSeek(
     base_url="https://api.deepseek.com",
 )
 
-
-#-----------------------------------------------Prompts------------------------------------------------
-# Define the prompt for the agent
-# prompt = ChatPromptTemplate.from_messages(
-#     [
-#         SystemMessage(content="Welcome to GradeMaster! Please provide your personal information, course details, and submission document."),
-#         MessagesPlaceholder(variable_name="messages"),
-#     ]
-# )
-
 #-----------------------------------------------------------------------------------------------
 # Nodes and Agents
 #-----------------------------------------------------------------------------------------------
 
-async def call_model(
-    state: OverallState, config: RunnableConfig
-) -> Dict[str, List[AIMessage]]:
-    """Call the LLM powering our "agent".
-
-    This function prepares the prompt, initializes the model, and processes the response.
-
-    Args:
-        state (State): The current state of the conversation.
-        config (RunnableConfig): Configuration for the model run.
-
-    Returns:
-        dict: A dictionary containing the model's response message.
+#--------------------------------------------Tool Node--------------------------------------------
+def create_travel_interface(state: OverallState) -> OverallState:
     """
-    configuration = Configuration.from_runnable_config(config)
-
-    # Initialize the model with tool binding. Change the model or add more tools here.
-    model = load_chat_model(configuration.model).bind_tools(TOOLS)
-
-    # Format the system prompt. Customize this to change the agent's behavior.
-    system_message = configuration.system_prompt.format(
-        system_time=datetime.now(tz=timezone.utc).isoformat()
+    Creates an interactive interface for users to input travel details and preferences.
+    Updates the state with the user's input.
+    """
+    # Create widgets for user input
+    destination_input = widgets.Text(
+        placeholder='Enter your destination (e.g., New York City)',
+        description='Destination:',
+        disabled=False
     )
 
-    # Get the model's response
-    response = cast(
-        AIMessage,
-        await model.ainvoke(
-            [{"role": "system", "content": system_message}, *state.messages], config
-        ),
+    start_date_picker = widgets.DatePicker(
+        description='Start Date:',
+        value=date.today(),
+        disabled=False
     )
 
-    # Handle the case when it's the last step and the model still wants to use a tool
-    if state.is_last_step and response.tool_calls:
+    end_date_picker = widgets.DatePicker(
+        description='End Date:',
+        value=date.today(),
+        disabled=False
+    )
+
+    num_adults_dropdown = widgets.Dropdown(
+        options=[(str(i), i) for i in range(1, 11)],
+        value=1,
+        description='Adults:',
+        disabled=False
+    )
+
+    num_children_dropdown = widgets.Dropdown(
+        options=[(str(i), i) for i in range(0, 11)],
+        value=0,
+        description='Children:',
+        disabled=False
+    )
+
+    num_rooms_dropdown = widgets.Dropdown(
+        options=[(str(i), i) for i in range(1, 6)],
+        value=1,
+        description='Rooms:',
+        disabled=False
+    )
+
+    preferences_text = widgets.Textarea(
+        placeholder='Enter your preferences (e.g., "I want a beach vacation with good food")',
+        description='Preferences:',
+        disabled=False
+    )
+
+    submit_button = widgets.Button(
+        description='Submit',
+        disabled=False,
+        button_style='success',
+        tooltip='Submit your travel details'
+    )
+
+    # Function to handle button click
+    def on_submit_button_clicked(b):
+        # Update the state with the user's input
+        state.destination = destination_input.value
+        state.start_date = start_date_picker.value
+        state.end_date = end_date_picker.value
+        state.num_adults = num_adults_dropdown.value
+        state.num_children = num_children_dropdown.value
+        state.num_rooms = num_rooms_dropdown.value
+        state.user_preferences = {"preferences": preferences_text.value}
+        
+        # Print the state to confirm the data is saved
+        print("State updated with the following information:")
+        print(f"Destination: {state.destination}")
+        print(f"Start Date: {state.start_date}")
+        print(f"End Date: {state.end_date}")
+        print(f"Number of Adults: {state.num_adults}")
+        print(f"Number of Children: {state.num_children}")
+        print(f"Number of Rooms: {state.num_rooms}")
+        print(f"Preferences: {state.user_preferences['preferences']}")
+        
+        # Proceed to the next step (e.g., calling the chat_node)
+        print("Proceeding to the next step...")
+
+    # Attach the button click handler
+    submit_button.on_click(on_submit_button_clicked)
+
+    # Display the widgets
+    display(destination_input)
+    display(start_date_picker)
+    display(end_date_picker)
+    display(num_adults_dropdown)
+    display(num_children_dropdown)
+    display(num_rooms_dropdown)
+    display(preferences_text)
+    display(submit_button)
+
+    return state
+
+#--------------------------------------------Chat Node --------------------------------------------
+# (uses conversational agent and returns a JSON format)
+# extracts user preferences and requirements from the conversation
+
+def chat_node(state: OverallState) -> OverallState:
+    """
+    Node to interact with the user, collect personal info, course info,
+    and submission document, and save it to the state.
+    """
+    llm = LangchainChatDeepSeek(
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
+        model= "deepseek-chat",
+        base_url="https://api.deepseek.com",
+        )
+    try:
+        # Initialize the conversation if no messages exist
+        if not state.messages:
+            state.messages = [
+                SystemMessage(content="Welcome! Please provide your travel preferences.")
+            ]
+        
+        # Check if the last message is from the user (HumanMessage)
+        if state.messages and isinstance(state.messages[-1], HumanMessage):
+            # Extract the user's message
+            user_message = state.messages[-1].content
+            
+            # Update user preferences based on the chat
+            state.user_preferences.update({"chat_preferences": user_message})
+            
+            # Prepare the context for the LLM
+            context = {
+                "location": state.location,
+                "destination": state.destination,
+                "start_date": state.start_date,
+                "end_date": state.end_date,
+                "num_adults": state.num_adults,
+                "num_children": state.num_children,
+                "num_rooms": state.num_rooms,
+                "num_rooms": state.num_rooms,
+                "user_preferences": state.user_preferences
+            }
+            
+            # Invoke the LLM with the current state and context
+            response = llm.invoke([SystemMessage(content=str(context)), HumanMessage(content=user_message)])
+            
+            # Append the LLM's response as an Assistant Message (AIMessage)
+            state.messages.append(AIMessage(content=response.content))  # Assuming `response` has a `content` attribute
+        
+        return state
+    except Exception as e:
+        # Handle errors gracefully
+        state.messages = state.messages + [SystemMessage(content=f"An error occurred: {str(e)}")]
+        state.next_node = "__end__"  # End the workflow if an error occurs
+        return state
+    
+#--------------------------------------------Flight Tool Node --------------------------------------------
+
+
+from langchain_core.messages import ToolMessage
+from langchain_core.runnables import RunnableLambda
+from langgraph.prebuilt import ToolNode
+
+def create_tool_node_with_fallback(tools: list) -> dict:
+    
+    def handle_tool_error(state) -> dict:
+        error = state.get("error")
+        tool_calls = state["messages"][-1].tool_calls
         return {
             "messages": [
-                AIMessage(
-                    id=response.id,
-                    content="Sorry, I could not find an answer to your question in the specified number of steps.",
-                )
+                ToolMessage(
+                    content=f"Error: {repr(error)}\n please fix your mistakes.",
+                    tool_call_id=tc["id"],
+                    )
+                for tc in tool_calls
+                ]
+            }
+    return ToolNode(tools).with_fallbacks(
+        [RunnableLambda(handle_tool_error)], exception_key="error"
+        )
+
+
+
+
+#--------------------------------------------Flight Finder Node--------------------------------------------
+
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import Runnable
+from langchain_openai import ChatOpenAI
+
+def create_llm_with_tools_node(llm, system_prompt: str, tools: list):
+    """
+    Creates an Assistant class that uses an LLM with tool binding.
+    
+    Args:
+        llm: The LLM to use (e.g., ChatOpenAI).
+        system_prompt: The system prompt for the LLM.
+        tools: A list of tools to bind to the LLM.
+    
+    Returns:
+        A callable Assistant class that can be used as a node.
+    """
+    # Define the assistant class
+    class Assistant:
+        def __init__(self, runnable: Runnable):
+            # Initialize with the runnable that defines the process for interacting with the tools
+            self.runnable = runnable
+
+        def __call__(self, state: dict):
+            while True:
+                # Invoke the runnable with the current state (messages and context)
+                result = self.runnable.invoke(state)
+                
+                # If the tool fails to return valid output, re-prompt the user to clarify or retry
+                if not result.tool_calls and (
+                    not result.content
+                    or isinstance(result.content, list)
+                    and not result.content[0].get("text")
+                ):
+                    # Add a message to request a valid response
+                    messages = state["messages"] + [("user", "Respond with a real output.")]
+                    state = {**state, "messages": messages}
+                else:
+                    # Break the loop when valid output is obtained
+                    break
+            
+            # Return the final state after processing the runnable
+            return {"messages": result}
+
+    # Define the assistant's prompt
+    primary_assistant_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            ("placeholder", "{messages}"),
+        ]
+    )
+
+    # Bind the tools to the assistant's workflow
+    assistant_runnable = primary_assistant_prompt | llm.bind_tools(tools)
+
+    # Return the Assistant class
+    return Assistant(assistant_runnable)
+
+
+#-------------------------------------------- Accommodation Finder --------------------------------------------
+
+
+
+#-------------------------------------------- Activity Planner --------------------------------------------
+
+def activity_planner_node(state: OverallState) -> OverallState:
+    """
+    Node to plan activities using a React agent and tools like Google Places.
+    Updates the state with a structured output of activities and places.
+    """
+    # Define the LLM
+    llm = LangchainChatDeepSeek(
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
+        model= "deepseek-chat",
+        base_url="https://api.deepseek.com",
+        )
+
+    # Define the tools (e.g., Google Places, Tavily Search, etc.)
+    tools = [
+        google_places_tool,  # Replace with actual Google Places tool
+        tavily_search_tool,  # Replace with actual Tavily Search tool
+    ]
+
+    # Define the detailed prompt for the React agent
+    react_agent_prompt = PromptTemplate.from_template(
+        '''You are a helpful travel activity planner. Your job is to suggest activities and places for users based on their preferences.
+        Use the tools provided to find information about activities and places. Return a structured output in the following format:
+        {
+            "activities": [
+                {
+                    "name": "Activity Name",
+                    "description": "Description of the activity",
+                    "places": [
+                        {
+                            "name": "Place Name",
+                            "address": "Place Address",
+                            "rating": "Place Rating"
+                        }
+                    ]
+                }
             ]
         }
 
-    # Return the model's response as a list to be added to existing messages
-    return {"messages": [response]}
+        Tools:
+        {tools}
+
+        Use the following format:
+        Question: the input question you must answer
+        Thought: you should always think about what to do
+        Action: the action you should take, should be one of [{tool_names}]
+        Action Input: the input to the action
+        Observation: the result of the action
+        Thought: I now know the final answer
+        Final Answer: [Your final answer here as a structured JSON object]
+
+        Examples:
+        1. Question: What are some fun activities in New York City?
+           Thought: I should search for popular activities in New York City.
+           Action: google_places_tool
+           Action Input: {"query": "popular activities in New York City"}
+           Observation: [{"name": "Central Park", "description": "A large, iconic park in Manhattan.", "places": [{"name": "Central Park Zoo", "address": "64th St and 5th Ave, New York, NY 10021", "rating": "4.5"}]}]
+           Thought: I now know the final answer.
+           Final Answer: {
+               "activities": [
+                   {
+                       "name": "Central Park",
+                       "description": "A large, iconic park in Manhattan.",
+                       "places": [
+                           {
+                               "name": "Central Park Zoo",
+                               "address": "64th St and 5th Ave, New York, NY 10021",
+                               "rating": "4.5"
+                           }
+                       ]
+                   }
+               ]
+           }
+
+        2. Question: What are some historical places to visit in Washington, D.C.?
+           Thought: I should search for historical places in Washington, D.C.
+           Action: tavily_search_tool
+           Action Input: {"query": "historical places in Washington, D.C."}
+           Observation: [{"name": "Lincoln Memorial", "description": "A national monument built to honor Abraham Lincoln.", "places": [{"name": "Lincoln Memorial", "address": "2 Lincoln Memorial Cir NW, Washington, DC 20037", "rating": "4.8"}]}]
+           Thought: I now know the final answer.
+           Final Answer: {
+               "activities": [
+                   {
+                       "name": "Lincoln Memorial",
+                       "description": "A national monument built to honor Abraham Lincoln.",
+                       "places": [
+                           {
+                               "name": "Lincoln Memorial",
+                               "address": "2 Lincoln Memorial Cir NW, Washington, DC 20037",
+                               "rating": "4.8"
+                           }
+                       ]
+                   }
+               ]
+           }
+
+        Begin!
+        Question: {input}
+        Thought: {agent_scratchpad}
+        '''
+    )
+
+    # Create the React agent
+    react_agent = create_react_agent(
+        llm=llm,
+        prompt=react_agent_prompt,
+        tools=tools,
+    )
+
+    # Create the agent executor
+    agent_executor = AgentExecutor(
+        agent=react_agent,
+        tools=tools,
+        verbose=True,
+        return_intermediate_steps=False,
+        handle_parsing_errors=True,
+    )
+
+    # Extract the user's query from the state
+    user_query = state.messages[-1].content if state.messages else "No query provided."
+
+    # Invoke the agent executor
+    try:
+        response = agent_executor.invoke({
+            "input": user_query,
+            "agent_scratchpad": "",  # Initialize with an empty scratchpad
+        })
+
+        # Parse the structured output
+        structured_output = json.loads(response["output"])  # Assuming the output is a JSON string
+        state.activities = structured_output["activities"]
+        print("Structured output:", structured_output)
+    except Exception as e:
+        # Handle errors gracefully
+        print(f"Error in activity_planner_node: {e}")
+        state.warnings = {"activity_planner_error": str(e)}
+
+    return state
 
 
+#------------------------------------------------Real-Time Data Provider-------------------------------------------------------
+# Googles Places API
+# Google Maps API
+# Google Weather API
+# Recommends things yoiu should be watch out for:
+# Car Rental
+# Crime rate
+# Weather
+# Currency Exchange
+# Language
+# Timezone
+# Vaccination
+# Visa
+# Electricity
+# Emergency Number
+# Driving
+# Tipping
+# Dress Code
+# Food
+# Shopping
+# Public Holidays
+# Festivals
+# Events
+# Local Customs
+# Local Laws
+# Local Etiquette
+# Local Time
+# Local Business Hours
+
+def realtime_provider(state: OverallState) -> OverallState:
+    """
+    Node to interact with the user, collect personal info, course info,
+    and submission document, and save it to the state.
+    """
+    pass
+
+
+#--------------------------------------------Itinerary Generator --------------------------------------------
+
+def itinerary_generator(state: OverallState) -> OverallState:
+    """
+    Node to interact with the user, collect personal info, course info,
+    and submission document, and save it to the state.
+    """
+    pass
 
 
 
@@ -110,12 +502,9 @@ class PersonalInfoSupervisor:
         student_name: str = Field(description="The full name of the student.")
         student_email: str = Field(description="The email address of the student.")
         student_id: str = Field(description="The unique identifier for the student.")
-        phone_number: str = Field(description="The phone number of the student.")
-        course_name: str = Field(description="The name of the course.")
         course_number: str = Field(description="The course number or code.")
         assignment_name: str = Field(description="The name of the assignment.")
         file_path: str = Field(description="The file path to the submission document.")
-        has_complaint: bool = Field(description="Whether the student has a complaint about their grades.")
     
     def __init__(self, llm: LangchainChatDeepSeek):
         """
@@ -142,244 +531,45 @@ class PersonalInfoSupervisor:
         )
         
         
-def personal_info_supervisor_node(state: Dict[str, Any], supervisor: PersonalInfoSupervisor) -> Dict[str, Any]:
+
+
+def personal_info_supervisor_node(state: OverallState)-> OverallState:
     """
     Supervisor node to interact with the student, collect personal info, course info,
     and submission document, and save it to the state.
     """
     try:
+        supervisor = PersonalInfoSupervisor(llm)
         # Initialize the conversation if no messages exist
-        if not state.get("messages"):
-            state["messages"] = [
-                SystemMessage(content="Welcome to GradeMaster! Please provide your personal information, course details, and submission document.")
-            ]
-        # Invoke the structured LLM with the current state
-        structured_output = supervisor.structured_llm.invoke({"messages": state["messages"]})
-        # Save the structured output to the state
-        state["student_name"] = structured_output.student_name
-        state["student_email"] = structured_output.student_email
-        state["student_id"] = structured_output.student_id
-        state["phone_number"] = structured_output.phone_number
-        state["course_name"] = structured_output.course_name
-        state["course_number"] = structured_output.course_number
-        state["assignment_name"] = structured_output.assignment_name
-        state["file_path"] = structured_output.file_path
+        
+        if not state.messages:
+            state.messages = supervisor.prompt.messages  # Initialize with the system message
+        
+                # Check if the last message is from the user (HumanMessage)
+        if state.messages and isinstance(state.messages[-1], HumanMessage):
+            # Invoke the structured LLM with the current state
+            structured_output = supervisor.structured_llm.invoke(state.messages)
+            # Save the structured output to the state
+            state.student_name = structured_output.student_name
+            state.student_email = structured_output.student_email
+            state.student_id = structured_output.student_id
+            state.course_number = structured_output.course_number
+            state.assignment_name = structured_output.assignment_name
+            state.file_path = structured_output.file_path
+            # Append the structured output as a system message for feedback
+            state.messages.append(AIMessage(content=f"Thank you! Here's what I collected:\n{structured_output}"))
+
         # Route to the next node (Grading or Complaint)
-        if structured_output.has_complaint:
-            state["next_node"] = "complaint_node"
-        else:
-            state["next_node"] = "grading_node"
-        return state
+        # return state
     except Exception as e:
-        return {
-            "messages": state.get("messages", []) + [SystemMessage(content=f"An error occurred: {str(e)}")],
-            "next_node": "__end__",  # End the workflow if an error occurs
-        }
-
-
-
-#--------------------------------------------Extract Tool Node--------------------------------------------
-# Tool Node Implementation
-def tool_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Tool node to process submitted files (PDF), split them by page ranges, extract text or images using OCR,
-    and structure the data into a list of dictionaries for each question.
-    Updates the state with structured data for grading or complaint processing.
-    """
-    try:
-        # Step 1: Split the PDF into smaller PDFs by page ranges
-        split_files = split_pdf_tool(state["file_path"], page_ranges=state["submission_page_ranges"])  # Example page ranges
-        # Step 2: Extract text from each split PDF using OCR
-        student_submission = []
-        for i, file_path in enumerate(split_files):
-            extracted_text = advanced_ocr_tool(file_path)
-            student_submission.append({f"question {i +1}": extracted_text})
-        # Step 3: Retrieve the solution key
-        solution_key = retrieve_solution_key_tool(state["course_number"], state["assignment_name"])
-        # Step 4: Update the state
-        state["student_submission"] = student_submission
-        state["solution_key"] = solution_key["text"]
-        state["scores"] = solution_key["scores"]
-        # Step 5: Route to the next node
-        state["next_node"] = "grading_node" if not state["has_complaint"] else "complaint_node"
-        return state
-    except Exception as e:
-        return {
-            "messages": [SystemMessage(content=f"An error occurred: {str(e)}")],
-            "next_node": "__end__",  # End the workflow if an error occurs
-        }
-
-
-#--------------------------------------------Grading Node--------------------------------------------
-
-from typing import Dict, Any, List
-from concurrent.futures import ThreadPoolExecutor
-from pydantic import BaseModel, Field
-
-# Grading Node Function
-def grading_node(state: Dict[str, Any], question_index: int) -> Dict[str, Any]:
-    """
-    Grades a specific question in the student's submission by comparing it with the solution key.
-    Updates the state with the grade and feedback for the question.
-    """
-    try:
-        # Extract the student's answer and solution for the question
-        student_answer = state["student_submission"][question_index]["question"]
-        solution = state["solution_key"]["questions"][question_index]
-        max_score = state["solution_key"]["scores"][question_index]
-        
-        # Simulate grading logic (e.g., compare student answer with solution)
-        # This can be replaced with more advanced grading logic (e.g., LLM-based grading)
-        if student_answer.strip().lower() == solution.strip().lower():
-            grade = max_score  # Full marks if the answer matches the solution
-            feedback = "Correct answer!"
-        else:
-            grade = max_score * 0.5  # Partial marks if the answer is partially correct
-            feedback = "Partially correct. Review the solution for better understanding."
-        
-        # Update the state with the grade and feedback
-        state["student_grades"][f"question_{question_index + 1}"] = grade
-        state["feedback_comments"].append(f"Question {question_index + 1}: {feedback}")
-        return state
-    except Exception as e:
-        state["feedback_comments"].append(f"Error grading question {question_index + 1}: {str(e)}")
-        return state
-
-# Parallel Grading Function
-def parallel_grading(state: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Grades all questions in parallel using multiple grading nodes.
-    Updates the state with grades and feedback for all questions.
-    """
-    try:
-        with ThreadPoolExecutor() as executor:
-            # Submit grading tasks for all questions
-            futures = [
-                executor.submit(grading_node, state, i)
-                for i in range(len(state["student_submission"]))
-            ]
-            # Wait for all tasks to complete
-            for future in futures:
-                state = future.result()
-        return state
-    except Exception as e:
-        state["feedback_comments"].append(f"Error during parallel grading: {str(e)}")
-        return state
+        # Handle errors gracefully
+        state.messages = state.messages + [SystemMessage(content=f"An error occurred: {str(e)}")]
+        state.next_node = "__end__"  # End the workflow if an error occurs
+        # return state
 
 
 
 
-#--------------------------------------------Reflection Node--------------------------------------------
-
-def reflection_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Analyzes the graded answers and verifies the quality of grading.
-    Reroutes for regrading if discrepancies are found.
-    """
-    try:
-        # Check if all questions have been graded
-        if len(state["student_grades"]) != len(state["student_submission"]):
-            state["feedback_comments"].append("Not all questions have been graded. Rerouting to grading nodes.")
-            state["next_node"] = "grading_node"
-            return state
-        
-        # Simulate reflection logic (e.g., check for inconsistencies in grading)
-        # This can be replaced with more advanced reflection logic (e.g., LLM-based analysis)
-        total_score = sum(state["student_grades"].values())
-        max_possible_score = sum(state["solution_key"]["scores"])
-        if total_score < max_possible_score * 0.5:  # Example threshold for regrading
-            state["feedback_comments"].append("Low overall score detected. Rerouting for regrading.")
-            state["next_node"] = "grading_node"
-        else:
-            state["feedback_comments"].append("Grading quality verified. Proceeding to insights node.")
-            state["next_node"] = "insights_node"
-        return state
-    except Exception as e:
-        state["feedback_comments"].append(f"Error during reflection: {str(e)}")
-        state["next_node"] = "__end__"
-        return state
-
-
-
-
-
-
-#--------------------------------------------Insights and Solution Node--------------------------------------------
-
-def insights_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Identifies weak points in the student's answers and prepares personalized notes or solutions.
-    Updates the state with insights and final output.
-    """
-    try:
-        # Simulate insights generation (e.g., identify weak points and provide solutions)
-        weak_points = []
-        for i, (question, grade) in enumerate(state["student_grades"].items()):
-            max_score = state["solution_key"]["scores"][i]
-            if grade < max_score * 0.8:  # Example threshold for weak points
-                weak_points.append(f"Question {i + 1}: Score {grade}/{max_score}. Review the solution: {state['solution_key']['questions'][i]}")
-        
-        # Prepare personalized notes
-        if weak_points:
-            state["reflection"] = "Weak points identified:\n" + "\n".join(weak_points)
-        else:
-            state["reflection"] = "Great job! No significant weak points identified."
-        
-        # Update the final output
-        state["final_output"] = {
-            "student_grades": state["student_grades"],
-            "feedback_comments": state["feedback_comments"],
-            "reflection": state["reflection"],
-        }
-        state["next_node"] = "__end__"
-        return state
-    except Exception as e:
-        state["feedback_comments"].append(f"Error during insights generation: {str(e)}")
-        state["next_node"] = "__end__"
-        return state
-
-
-
-
-
-#--------------------------------------------Reporting Node--------------------------------------------
-
-from openpyxl import Workbook
-from typing import Dict, Any
-import os
-
-def reporting_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Compiles grades and feedback into an Excel sheet.
-    Saves the Excel file and updates the state with the file path.
-    """
-    try:
-        # Create a new Excel workbook
-        workbook = Workbook()
-        sheet = workbook.active
-        sheet.title = "Grades and Feedback"
-        
-        # Add headers
-        sheet.append(["Question", "Grade", "Feedback"])
-        
-        # Add grades and feedback
-        for i, (question, grade) in enumerate(state["student_grades"].items()):
-            feedback = state["feedback_comments"][i]
-            sheet.append([question, grade, feedback])
-        
-        # Save the Excel file
-        report_path = os.path.join("reports", f"{state['student_id']}_grades.xlsx")
-        os.makedirs("reports", exist_ok=True)
-        workbook.save(report_path)
-        
-        # Update the state with the report path
-        state["report_path"] = report_path
-        state["next_node"] = "notification_node"
-        return state
-    except Exception as e:
-        state["feedback_comments"].append(f"Error during report generation: {str(e)}")
-        state["next_node"] = "__end__"
-        return state
 
 
 
