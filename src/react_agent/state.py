@@ -52,10 +52,16 @@ class OverallState:
     "Stores the sequence of messages exchanged between the user and the agent."
     location: Optional[str] = None
     "The user's current location or starting point."
+    loc_code: Optional[str] = None
+    "The airport code of the user's current location."
     destination: Optional[str] = None
     "The destination the user wants to travel to."
+    dest_code: Optional[str] = None
+    "The airport code of the user's destination."
     budget: Optional[float] = None
     "The user's travel budget in their chosen currency."
+    travel_class: Optional[int] = None
+    "The travel class chosen by the user (1: Economy, 2: Premium Economy, 3: Business, 4: First)."    
     start_date: Optional[date] = None
     "The start date of the trip."
     end_date: Optional[date] = None
@@ -66,6 +72,8 @@ class OverallState:
     "The number of children traveling."
     num_rooms: Optional[int] = None
     "The number of rooms required for accommodation."
+    travel_class: Optional[int] = None  # Add this line
+    "The travel class chosen by the user (1: Economy, 2: Premium Economy, 3: Business, 4: First)."
     
     # User Preferences
     user_preferences: Dict[str, Any] = field(default_factory=dict)

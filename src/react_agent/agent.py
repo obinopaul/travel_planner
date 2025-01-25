@@ -5,7 +5,9 @@ Works with a chat model with tool calling support.
 
 from datetime import datetime, timezone
 from typing import Dict, List, Literal, cast
-
+from pydantic import BaseModel, Field
+from typing import Optional
+from datetime import date
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
@@ -30,18 +32,15 @@ from langchain.tools import BaseTool, Tool
 from langchain_core.runnables import Runnable
 from src.react_agent.configuration import Configuration
 from src.react_agent.state import InputState, OverallState, OutputState
-from src.react_agent.prompts import PERSONAL_INFO_PROMPT, USER_PROMPT
-from src.react_agent.tools import (TOOLS, AmadeusFlightSearchInput, AmadeusFlightSearchTool, 
-                                   AmadeusHotelSearchTool, AmadeusHotelSearchInput,
-                                   GeoapifyPlacesSearchTool, GeoapifyPlacesSearchInput,
-                                   WeatherSearchTool, WeatherSearchInput,
-                                   GoogleFlightsSearchTool, FlightSearchInput, 
-                                   GoogleScholarSearchTool, GoogleScholarSearchInput,
-                                   BookingScraperTool, BookingSearchInput,
-                                   tavily_search_tool, google_places_tool, google_find_place_tool, google_place_details_tool,
-                                   )
+from src.react_agent.prompts import PERSONAL_INFO_PROMPT, USER_PROMPT, SYSTEM_PROMPT
+
+from src.react_agent.tools import (TOOLS, amadeus_tool, amadeus_hotel_tool, geoapify_tool, weather_tool, 
+                                   googlemaps_tool, flight_tool, google_scholar_tool, booking_tool,
+                                   google_places_tool, google_find_place_tool, google_place_details_tool, tavily_search_tool,
+                                   flight_tools_condition, accomodation_tools_condition, activity_planner_tools_condition, 
+                                   FlightSearchInput, AmadeusFlightSearchInput)
+
 from src.react_agent.utils import load_chat_model
-from langchain.agents import create_react_agent, AgentExecutor
 from langchain_core.tools import tool
 
 # Define the function that calls the model
@@ -58,103 +57,165 @@ llm = LangchainChatDeepSeek(
 # Nodes and Agents
 #-----------------------------------------------------------------------------------------------
 
-#--------------------------------------------Tool Node--------------------------------------------
-def create_travel_interface(state: OverallState) -> OverallState:
+#----------------------------------------------- First Node--------------------------------------------
+
+class TravelItinerary(BaseModel):
+    location: Optional[str] = Field(description="The user's current location or starting point.")
+    loc_code: Optional[str] = Field(description="The airport code of the user's current location.")
+    destination: Optional[str] = Field(description="The destination the user wants to travel to.")
+    dest_code: Optional[str] = Field(description="The airport code of the user's destination.")
+    budget: Optional[float] = Field(description="The user's travel budget in their chosen currency.")
+    start_date: Optional[date] = Field(description="The start date of the trip.")
+    end_date: Optional[date] = Field(description="The end date of the trip.")
+    num_adults: Optional[int] = Field(description="The number of adults traveling.")
+    num_children: Optional[int] = Field(description="The number of children traveling.")
+    num_rooms: Optional[int] = Field(description="The number of rooms required for accommodation.")
+    user_preferences: Optional[Dict[str, Any]] = Field(description="User preferences and requirements.")
+    
+def travel_itinerary_planner(state: OverallState) -> OverallState:
+    # Define the LLM with structured output
+    
+    llm = LangchainChatDeepSeek(
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
+        model= "deepseek-chat",
+        base_url="https://api.deepseek.com",
+        )
+    
+    # Define the LLM with structured output
+    llm_with_structure_op = llm.with_structured_output(TravelItinerary)
+    
+    # Define the prompt template
+    prompt = PromptTemplate(
+        template="""You are a travel itinerary planner. Your task is to extract relevant information from the user's query to plan a trip.
+                    Here is the user's query: {query}
+                    Extract the following information:
+                    - Location (starting point)
+                    - loc_code (an uppercase 3-letter airport code of the starting point, use the IATA airport codes, and if not available, use the city name. If there are multiple airports, choose the main one. Unless the user specifies a specific airport, use the city name.)
+                    - Destination
+                    - dest_code (an uppercase 3-letter airport code of the destination. use the IATA airport codes, and if not available, use the city name. If there are multiple airports, choose the main one. Unless the user specifies a specific airport, use the city name.)
+                    - Budget
+                    - travel_class (1: Economy, 2: Premium Economy, 3: Business, 4: First). the travel class specified by the user, else None.
+                    - Start date
+                    - End date
+                    - Number of adults
+                    - Number of children
+                    - Number of rooms
+                    - User preferences
+                    If any information is missing, leave it as None.
+                    
+                    For example, if the user query is "I want to travel from New York to Los Angeles on July 1st, 2022, with a budget of $5000 for 2 adults and 1 child, and return on July 20th, 2022" you should extract the following information:
+                    - Location: New York
+                    - loc_code: JFK
+                    - Destination: Los Angeles
+                    - dest_code: LAX
+                    - Budget: $5000
+                    - Start date: 2022-07-01
+                    - End date: 2022-07-20
+                    - Number of adults: 2
+                    - Number of children: 1
+                    - Number of rooms: None
+                    - User preferences: None
+                    """,
+        input_variables=["query"]
+    )
+    
+    # Create the chain
+    chain = prompt | llm_with_structure_op
+    
+    # Get the last message from the state
+    messages = state.messages
+    last_message = messages[-1].content
+    
+    # Invoke the chain with the user's query
+    structured_output = chain.invoke({"query": last_message})
+    
+    # Update the state with the structured output
+    updated_state = {
+        "location": structured_output.location,
+        "loc_code": structured_output.loc_code,
+        "destination": structured_output.destination,
+        "dest_code": structured_output.dest_code,
+        "budget": structured_output.budget,
+        "start_date": structured_output.start_date,
+        "end_date": structured_output.end_date,
+        "num_adults": structured_output.num_adults,
+        "num_children": structured_output.num_children,
+        "num_rooms": structured_output.num_rooms,
+        "user_preferences": structured_output.user_preferences,
+    }
+    
+    # Return the updated state
+    return updated_state
+
+
+#--------------------------------------------Flight Finder Node--------------------------------------------
+def flight_finder_tool_node(state: OverallState) -> OverallState:
     """
-    Creates an interactive interface for users to input travel details and preferences.
-    Updates the state with the user's input.
+    A Tool Node that calls both Amadeus and Google Flights tools in parallel
+    and stores the results in the `flights` state variable.
     """
-    # Create widgets for user input
-    destination_input = widgets.Text(
-        placeholder='Enter your destination (e.g., New York City)',
-        description='Destination:',
-        disabled=False
-    )
+    # Extract inputs from the state
+    location = state.location
+    loc_code = state.loc_code
+    destination = state.destination
+    dest_code = state.dest_code
+    start_date = state.start_date.strftime("%Y-%m-%d") if state.start_date else None
+    end_date = state.end_date.strftime("%Y-%m-%d") if state.end_date else None
+    num_adults = state.num_adults or 1
+    num_children = state.num_children or 0
+    travel_class = state.travel_class
+    budget = state.budget
+    user_preferences = state.user_preferences
 
-    start_date_picker = widgets.DatePicker(
-        description='Start Date:',
-        value=date.today(),
-        disabled=False
-    )
+    # Initialize a temporary list to store flight results
+    flights_dict = {}
 
-    end_date_picker = widgets.DatePicker(
-        description='End Date:',
-        value=date.today(),
-        disabled=False
-    )
-
-    num_adults_dropdown = widgets.Dropdown(
-        options=[(str(i), i) for i in range(1, 11)],
-        value=1,
-        description='Adults:',
-        disabled=False
-    )
-
-    num_children_dropdown = widgets.Dropdown(
-        options=[(str(i), i) for i in range(0, 11)],
-        value=0,
-        description='Children:',
-        disabled=False
-    )
-
-    num_rooms_dropdown = widgets.Dropdown(
-        options=[(str(i), i) for i in range(1, 6)],
-        value=1,
-        description='Rooms:',
-        disabled=False
-    )
-
-    preferences_text = widgets.Textarea(
-        placeholder='Enter your preferences (e.g., "I want a beach vacation with good food")',
-        description='Preferences:',
-        disabled=False
-    )
-
-    submit_button = widgets.Button(
-        description='Submit',
-        disabled=False,
-        button_style='success',
-        tooltip='Submit your travel details'
-    )
-
-    # Function to handle button click
-    def on_submit_button_clicked(b):
-        # Update the state with the user's input
-        state.destination = destination_input.value
-        state.start_date = start_date_picker.value
-        state.end_date = end_date_picker.value
-        state.num_adults = num_adults_dropdown.value
-        state.num_children = num_children_dropdown.value
-        state.num_rooms = num_rooms_dropdown.value
-        state.user_preferences = {"preferences": preferences_text.value}
+    # Define travel class mapping
+    travel_class = {
+        1: "Economy",
+        2: "Premium Economy",
+        3: "Business",
+        4: "First",
+    }
+    
+    # Call both tools in parallel (or sequentially if parallel execution is not supported)
+    if location and destination and start_date:
+        # Loop through travel classes (1 to 4)
+        for i in range(1, 5):
+            flight_class = travel_class[i]
+                            
+            # Call Google Flights Search Tool        
+            flight_search_input = FlightSearchInput(
+                departure_id=loc_code,
+                arrival_id=dest_code,
+                outbound_date=start_date,
+                return_date=end_date,
+                adults=num_adults,
+                children=num_children,
+                currency=user_preferences.get("currency", "USD"),
+                travel_class=i,
+                sort_by=user_preferences.get("sort_by", 1)
+            )
         
-        # Print the state to confirm the data is saved
-        print("State updated with the following information:")
-        print(f"Destination: {state.destination}")
-        print(f"Start Date: {state.start_date}")
-        print(f"End Date: {state.end_date}")
-        print(f"Number of Adults: {state.num_adults}")
-        print(f"Number of Children: {state.num_children}")
-        print(f"Number of Rooms: {state.num_rooms}")
-        print(f"Preferences: {state.user_preferences['preferences']}")
-        
-        # Proceed to the next step (e.g., calling the chat_node)
-        print("Proceeding to the next step...")
+            google_flights_results = flight_tool.func(flight_search_input)
 
-    # Attach the button click handler
-    submit_button.on_click(on_submit_button_clicked)
+            # Debugging: Print the raw API response
+            print(f"API Response for {flight_class}: {google_flights_results}")
 
-    # Display the widgets
-    display(destination_input)
-    display(start_date_picker)
-    display(end_date_picker)
-    display(num_adults_dropdown)
-    display(num_children_dropdown)
-    display(num_rooms_dropdown)
-    display(preferences_text)
-    display(submit_button)
+            # Add the results to the temporary dictionary under the travel class key
+            flights_dict[flight_class] = google_flights_results
+            
+    else:
+        # Handle incomplete travel details
+        flights_dict["error"] = "Incomplete travel details. Missing location, destination, or start date."
 
+    # Assign the temporary list to the state.flights after the loop
+    state.flights = [flights_dict]
+    
+    # Return the updated state
     return state
+
+
 
 #--------------------------------------------Chat Node --------------------------------------------
 # (uses conversational agent and returns a JSON format)
@@ -218,9 +279,9 @@ from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableLambda
 from langgraph.prebuilt import ToolNode
 
-def create_tool_node_with_fallback(tools: list) -> dict:
+def create_tool_node_with_fallback(tools: list) -> OverallState:
     
-    def handle_tool_error(state) -> dict:
+    def handle_tool_error(state) -> OverallState:
         error = state.get("error")
         tool_calls = state["messages"][-1].tool_calls
         return {
@@ -239,12 +300,15 @@ def create_tool_node_with_fallback(tools: list) -> dict:
 
 
 
-#--------------------------------------------Flight Finder Node--------------------------------------------
+
 
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI
+
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema.runnable import Runnable
 
 def create_llm_with_tools_node(llm, system_prompt: str, tools: list):
     """
@@ -264,10 +328,46 @@ def create_llm_with_tools_node(llm, system_prompt: str, tools: list):
             # Initialize with the runnable that defines the process for interacting with the tools
             self.runnable = runnable
 
-        def __call__(self, state: dict):
+        def __call__(self, state: OverallState) -> OverallState:
             while True:
-                # Invoke the runnable with the current state (messages and context)
-                result = self.runnable.invoke(state)
+                # Define the human message (query) based on the state
+                query = f"""
+                The user wants to travel from {state.loc_code} to {state.dest_code}. 
+                The trip starts on {state.start_date} and ends on {state.end_date}. 
+                The user is traveling with {state.num_adults} adults and {state.num_children} children. 
+                The budget for flights is {state.budget}, 
+                Travel class: {state.travel_class},  # Use state.travel_class here, 
+                Additional preferences include: {state.user_preferences}.
+                """
+                
+                # Combine the system prompt, human message (query), and existing state messages
+                structured_prompt = ChatPromptTemplate.from_messages(
+                                [
+                                    SystemMessage(content=system_prompt),
+                                    HumanMessage(content=query),
+                                    MessagesPlaceholder(variable_name="messages"),
+                                ]
+                        )
+
+                # Format the structured prompt with the required variables
+                formatted_prompt = structured_prompt.format(messages=state.messages)
+
+                # Update the state with the formatted prompt
+                updated_state = OverallState(
+                    loc_code=state.loc_code,
+                    dest_code=state.dest_code,
+                    start_date=state.start_date,
+                    end_date=state.end_date,
+                    num_adults=state.num_adults,
+                    num_children=state.num_children,
+                    budget=state.budget,
+                    user_preferences=state.user_preferences,
+                    travel_class=state.travel_class,
+                    messages=formatted_prompt,  # Update messages with the formatted prompt
+                )
+                
+                # Invoke the runnable with the updated state
+                result = self.runnable.invoke(updated_state)
                 
                 # If the tool fails to return valid output, re-prompt the user to clarify or retry
                 if not result.tool_calls and (
@@ -276,14 +376,13 @@ def create_llm_with_tools_node(llm, system_prompt: str, tools: list):
                     and not result.content[0].get("text")
                 ):
                     # Add a message to request a valid response
-                    messages = state["messages"] + [("user", "Respond with a real output.")]
-                    state = {**state, "messages": messages}
+                    updated_state.messages = "Please provide more details or clarify your request."
                 else:
                     # Break the loop when valid output is obtained
                     break
-            
+
             # Return the final state after processing the runnable
-            return {"messages": result}
+            return updated_state
 
     # Define the assistant's prompt
     primary_assistant_prompt = ChatPromptTemplate.from_messages(
@@ -292,10 +391,10 @@ def create_llm_with_tools_node(llm, system_prompt: str, tools: list):
             ("placeholder", "{messages}"),
         ]
     )
-
+    
     # Bind the tools to the assistant's workflow
     assistant_runnable = primary_assistant_prompt | llm.bind_tools(tools)
-
+    
     # Return the Assistant class
     return Assistant(assistant_runnable)
 
@@ -525,7 +624,7 @@ class PersonalInfoSupervisor:
         """
         return ChatPromptTemplate.from_messages(
             [
-                SystemMessage(content=PERSONAL_INFO_PROMPT),
+                SystemMessage(content=SYSTEM_PROMPT),
                 MessagesPlaceholder(variable_name="messages"),
             ]
         )

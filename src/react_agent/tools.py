@@ -6,7 +6,7 @@ These tools are intended as free examples to get started. For production use,
 consider implementing more robust and specialized tools tailored to your needs.
 """
 
-from typing import Any, Callable, List, Optional, cast
+from typing import Any, Callable, List, Optional, cast, Dict, Literal
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import InjectedToolArg
@@ -24,8 +24,9 @@ from langdetect import detect
 import re
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
-from typing import List, Dict
+from typing import List, Dict, Iterator
 from langchain.schema import HumanMessage, AIMessage
+from langchain_core.messages import AnyMessage, HumanMessage
 from langchain.prompts.chat import ChatPromptTemplate
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
@@ -51,6 +52,46 @@ load_dotenv()
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+#----------------------------------------------------------- Tools i have created -----------------------------------------------------------
+# Tavily Search: Performs web searches using the Tavily search engine, providing accurate and trusted results for general queries.
+# Amadeus Flight Search: Searches for flight availability and prices using the Amadeus API.
+# Amadeus Hotel Search: Searches for hotel availability and prices using the Amadeus API.
+# Geoapify Places Search: Searches for points of interest in a location using the Geoapify Places API.
+# Weather Search: Provides weather information for a given location and date using the OpenWeatherMap API.
+# Route Finder: Finds the optimal route between locations using the Google Maps API.
+# Flight Search: Provides flight information between two locations, including airlines, prices, departure/arrival times, and more.
+# Google Scholar Search: Provides academic research results from Google Scholar, including titles, links, snippets, publication info, citations, and versions.
+# Booking Scraper: Scrapes hotel data from Booking.com based on destination, check-in/check-out dates, and other parameters.
+# Address Validation: Uses Google Maps Address Validation API to validate and refine addresses.
+# Google Maps Static Map: Generates a static map image using the Google Maps Static API.
+# Google Maps Roads API: Calls the Google Maps Roads API for snap-to-roads, nearest-roads, and speed limits.
+# Google Maps Time Zone: Calls the Google Maps Time Zone API to get time zone information for a location.
+# Google Maps Places API: Calls the Google Maps Places API for text search and nearby search.
+# Google Maps Find Place API: Calls the Google Maps Find Place API to find places by text query.
+# Google Maps Place Details API: Calls the Google Maps Place Details API to get detailed information about a place.
+# Google Maps Geolocation: Calls the Google Maps Geolocation API to estimate the device's location.
+# Google Maps Geocoding: Calls the Google Maps Geocoding API to convert addresses to geographic coordinates.
+# Google Maps Elevation: Calls the Google Maps Elevation API to get elevation data for locations.
+# Google Maps Distance Matrix: Calls the Google Maps Distance Matrix API to get travel distance and time data.
+# Google Maps Directions: Calls the Google Maps Directions API to get travel directions.
+# Yelp Business Search: Calls the Yelp Business Search endpoint to find businesses.
+# Yelp Phone Search: Calls the Yelp Phone Search endpoint to find businesses by phone number.
+# Yelp Business Details: Calls the Yelp Business Details endpoint to get information about a business.
+# Yelp Business Reviews: Calls the Yelp Business Reviews endpoint to get reviews for a business.
+# Yelp Events Search: Calls the Yelp Events search endpoint to find local events.
+# Yelp GraphQL: Calls the Yelp GraphQL endpoint with a user-provided query.
+# YouTube Search: Calls the YouTube Data API's 'search' endpoint to find videos.
+# YouTube Videos: Calls the YouTube Data API's 'videos' endpoint to get video details.
+# YouTube CommentThreads: Calls the YouTube Data API's 'commentThreads' endpoint to get video comments.
+# YouTube PlaylistItems: Calls the YouTube Data API's 'playlistItems' endpoint to get playlist items.
+# docling_text_extractor: Extracts text from PDFs with OCR fallback.
+# docling_table_extractor: Extracts structured tables from PDF documents.
+# docling_full_processor: Comprehensive PDF processing with text, OCR, and table extraction.
+# add_file_to_collection: Add a file to the Needle collection.
+# search_collection: Search the Needle collection using a retrieval chain.
+
+
 
 
 #----------------------------------------------------------------------------------------------------------------------------
@@ -104,8 +145,13 @@ class AmadeusFlightSearchTool:
     def __init__(self):
         self.client_id = os.getenv('AMADEUS_CLIENT_ID')
         self.client_secret = os.getenv('AMADEUS_CLIENT_SECRET')
+        if not self.client_id or not self.client_secret:
+            raise ValueError("AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET environment variables are required.")
 
     def _get_access_token(self):
+        """
+        Fetches an access token from the Amadeus API.
+        """
         url = "https://test.api.amadeus.com/v1/security/oauth2/token"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         data = {
@@ -115,27 +161,41 @@ class AmadeusFlightSearchTool:
         }
         try:
             response = requests.post(url, headers=headers, data=data)
-            response.raise_for_status()
-            return response.json()["access_token"]
+            response.raise_for_status()  # Raise an error for bad status codes
+            token_data = response.json()
+            return token_data["access_token"]
         except Exception as e:
             raise Exception(f"Failed to obtain access token: {str(e)}")
 
-    def search_flights(self, origin: str, destination: str, departure_date: str, adults: int = 1, max_price: Optional[int] = None) -> str:
-        access_token = self._get_access_token()
-        url = "https://test.api.amadeus.com/v2/shopping/flight-offers"
-        params = {
-            "originLocationCode": origin,
-            "destinationLocationCode": destination,
-            "departureDate": departure_date,
-            "adults": adults,
-            "max": 5  # Limit to 5 results for brevity
-        }
-        if max_price:
-            params["maxPrice"] = max_price
-        headers = {"Authorization": f"Bearer {access_token}"}
+    def search_flights(self, input: AmadeusFlightSearchInput) -> str:
+        """
+        Searches for flights using the Amadeus API.
+        """
         try:
+            # Get the access token
+            access_token = self._get_access_token()
+            print(f"Access Token: {access_token}")  # Debugging: Print the access token
+
+            # Prepare the API request
+            url = "https://test.api.amadeus.com/v2/shopping/flight-offers"
+            params = {
+                "originLocationCode": input.origin,
+                "destinationLocationCode": input.destination,
+                "departureDate": input.departure_date,
+                "adults": input.adults,
+                "max": 5  # Limit to 5 results for brevity
+            }
+            if input.max_price:
+                params["maxPrice"] = input.max_price
+
+            headers = {"Authorization": f"Bearer {access_token}"}
+            print(f"Request Headers: {headers}")  # Debugging: Print the headers
+
+            # Make the API request
             response = requests.get(url, headers=headers, params=params)
-            response.raise_for_status()
+            response.raise_for_status()  # Raise an error for bad status codes
+
+            # Parse the response
             data = response.json()["data"]
             results = []
             for offer in data:
@@ -148,8 +208,16 @@ class AmadeusFlightSearchTool:
                 result += "---\n"
                 results.append(result)
             return "\n".join(results) if results else "No flights found matching the criteria."
+        except requests.exceptions.HTTPError as e:
+            # Handle HTTP errors (e.g., 401 Unauthorized)
+            error_message = f"HTTP Error: {e.response.status_code} - {e.response.text}"
+            print(error_message)  # Debugging: Print the error message
+            return error_message
         except Exception as e:
-            return f"An error occurred while searching for flights: {str(e)}"
+            # Handle other exceptions
+            error_message = f"An error occurred while searching for flights: {str(e)}"
+            print(error_message)  # Debugging: Print the error message
+            return error_message
 
 # # Create the LangChain Tool
 amadeus_tool = Tool(
@@ -727,6 +795,29 @@ googlemaps_tool = Tool(
 #     print("Duration:", route["duration"])
 #     print("Route Coordinates:", route["route_coordinates"])
 
+#------------------------------------------------------------------------------------------------------------------------------
+@tool
+def multiply_numbers(numbers: list) -> float:
+    """
+    Multiplies a list of numbers and returns the product.
+
+    Args:
+        numbers (list): A list of numbers to multiply.
+
+    Returns:
+        float: The product of the numbers.
+    """
+    product = 1
+    for num in numbers:
+        product *= num
+    return product
+
+# Step 2: Wrap the tool in a LangChain Tool object
+multiply_tool = Tool(
+    name="multiply_numbers",
+    func=multiply_numbers,
+    description="Multiplies a list of numbers and returns the product."
+)
 
 
 #----------------------------------------------------------------------------------------------------------------------------
@@ -751,6 +842,106 @@ class FlightSearchInput(BaseModel):
     travel_class: int = Field(default=1, description="The travel class (1: Economy, 2: Premium Economy, 3: Business, 4: First).")
     sort_by: int = Field(default=1, description="The sorting order of the results (1: Top flights, 2: Price, etc.).")
     deep_search: bool = Field(default=False, description="Enable deep search for more precise results.")
+
+# Define the Tool
+# class GoogleFlightsSearchTool:
+#     def __init__(self):
+#         self.api_key = os.getenv("SERPAPI_API_KEY")
+#         if not self.api_key:
+#             raise ValueError("SerpApi API key is missing. Please set the SERPAPI_API_KEY environment variable.")
+#         self.base_url = "https://serpapi.com/search.json"
+
+#     def _extract_flight_details(self, flight: Dict[str, Any]) -> Dict[str, Any]:
+#         """
+#         Extract and structure detailed flight information from a flight result.
+        
+#         Args:
+#             flight: A dictionary representing a flight result from the API.
+        
+#         Returns:
+#             A dictionary containing structured flight details.
+#         """
+#         details = {
+#             "airlines": [leg["airline"] for leg in flight.get("flights", [])],
+#             "price": flight.get("price"),
+#             "departure_airport": flight.get("flights", [{}])[0].get("departure_airport", {}).get("name"),
+#             "arrival_airport": flight.get("flights", [{}])[-1].get("arrival_airport", {}).get("name"),
+#             "departure_time": flight.get("flights", [{}])[0].get("departure_airport", {}).get("time"),
+#             "arrival_time": flight.get("flights", [{}])[-1].get("arrival_airport", {}).get("time"),
+#             "total_duration": flight.get("total_duration"),
+#             "layovers": [
+#                 {
+#                     "duration": layover.get("duration"),
+#                     "airport": layover.get("name"),
+#                     "overnight": layover.get("overnight", False),
+#                 }
+#                 for layover in flight.get("layovers", [])
+#             ],
+#             "travel_class": flight.get("flights", [{}])[0].get("travel_class"),
+#             "carbon_emissions": flight.get("carbon_emissions", {}).get("this_flight"),
+#             "booking_token": flight.get("booking_token"),
+#             "departure_token": flight.get("departure_token"),
+#         }
+#         return details
+
+#     def search_flights(self, input: FlightSearchInput) -> Dict[str, Any]:
+#         """
+#         Search for flights using the Google Flights API via SerpApi.
+        
+#         Args:
+#             input: The flight search parameters.
+        
+#         Returns:
+#             A dictionary containing the flight search results, with detailed information for cheap and expensive flights.
+#         """
+#         params = {
+#             "engine": "google_flights",
+#             "departure_id": input.departure_id,
+#             "arrival_id": input.arrival_id,
+#             "outbound_date": input.outbound_date,
+#             "currency": input.currency,
+#             "hl": input.hl,
+#             "adults": input.adults,
+#             "children": input.children,
+#             "infants_in_seat": input.infants_in_seat,
+#             "infants_on_lap": input.infants_on_lap,
+#             "travel_class": input.travel_class,
+#             "sort_by": input.sort_by,
+#             "deep_search": input.deep_search,
+#             "api_key": self.api_key,
+#         }
+        
+#         if input.return_date:
+#             params["return_date"] = input.return_date
+
+#         try:
+#             response = requests.get(self.base_url, params=params)
+#             response.raise_for_status()
+#             results = response.json()
+
+#             # Separate flights into cheap and expensive based on price insights
+#             price_insights = results.get("price_insights", {})
+#             typical_price_range = price_insights.get("typical_price_range", [0, float("inf")])
+
+#             cheap_flights = []
+#             expensive_flights = []
+
+#             for flight in results.get("best_flights", []) + results.get("other_flights", []):
+#                 flight_details = self._extract_flight_details(flight)
+#                 if flight["price"] <= typical_price_range[1]:
+#                     cheap_flights.append(flight_details)
+#                 else:
+#                     expensive_flights.append(flight_details)
+
+#             return {
+#                 "cheap_flights": cheap_flights,
+#                 "expensive_flights": expensive_flights,
+#                 "price_insights": price_insights,
+#                 "search_metadata": results.get("search_metadata", {}),
+#             }
+#         except Exception as e:
+#             return {"error": f"An error occurred: {str(e)}"}
+
 
 # Define the Tool
 class GoogleFlightsSearchTool:
@@ -801,7 +992,7 @@ class GoogleFlightsSearchTool:
             input: The flight search parameters.
         
         Returns:
-            A dictionary containing the flight search results, with detailed information for cheap and expensive flights.
+            A dictionary containing the flight search results, with detailed information for best and other flights.
         """
         params = {
             "engine": "google_flights",
@@ -828,29 +1019,20 @@ class GoogleFlightsSearchTool:
             response.raise_for_status()
             results = response.json()
 
-            # Separate flights into cheap and expensive based on price insights
-            price_insights = results.get("price_insights", {})
-            typical_price_range = price_insights.get("typical_price_range", [0, float("inf")])
-
-            cheap_flights = []
-            expensive_flights = []
-
-            for flight in results.get("best_flights", []) + results.get("other_flights", []):
-                flight_details = self._extract_flight_details(flight)
-                if flight["price"] <= typical_price_range[1]:
-                    cheap_flights.append(flight_details)
-                else:
-                    expensive_flights.append(flight_details)
+            # Extract best and other flights
+            best_flights = [self._extract_flight_details(flight) for flight in results.get("best_flights", [])]
+            other_flights = [self._extract_flight_details(flight) for flight in results.get("other_flights", [])]
 
             return {
-                "cheap_flights": cheap_flights,
-                "expensive_flights": expensive_flights,
-                "price_insights": price_insights,
+                "best_flights": best_flights,
+                "other_flights": other_flights,
                 "search_metadata": results.get("search_metadata", {}),
+                "search_parameters": results.get("search_parameters", {}),
             }
         except Exception as e:
             return {"error": f"An error occurred: {str(e)}"}
-
+        
+        
 flight_tool = Tool(
     name="Flight Search",
     func=GoogleFlightsSearchTool().search_flights,
@@ -1190,7 +1372,7 @@ def search_collection(query: str) -> str:
 
 #------------------------------------------------------------
 # List of available tools
-TOOLS: List[Callable[..., Any]] = [search_tool]
+TOOLS: List[Callable[..., Any]] = [tavily_search_tool]
 #------------------------------------------------------------
 
 
@@ -2814,4 +2996,224 @@ youtube_playlist_items_tool = Tool(
     func=YouTubePlaylistItemsTool().run_playlist_items,
     description="Calls the YouTube Data API's 'playlistItems' endpoint to get playlist items.",
     args_schema=YouTubePlaylistItemsInput
+)
+
+
+
+#---------------------------------------------------------- Tools Condition ----------------------------------------------------------
+
+def flight_tools_condition(
+    state: Union[list[AnyMessage], dict[str, Any], BaseModel],
+    messages_key: str = "messages",
+) -> Literal["flight_tools", "accomodation_node"]:
+    """Use in the conditional_edge to route to the ToolNode if the last message
+
+    has tool calls. Otherwise, route to the end.
+
+    Args:
+        state (Union[list[AnyMessage], dict[str, Any], BaseModel]): The state to check for
+            tool calls. Must have a list of messages (MessageGraph) or have the
+            "messages" key (StateGraph).
+
+    Returns:
+        The next node to route to.
+    """
+    if isinstance(state, list):
+        ai_message = state[-1]
+    elif isinstance(state, dict) and (messages := state.get(messages_key, [])):
+        ai_message = messages[-1]
+    elif messages := getattr(state, messages_key, []):
+        ai_message = messages[-1]
+    else:
+        raise ValueError(f"No messages found in input state to tool_edge: {state}")
+    if hasattr(ai_message, "tool_calls") and len(ai_message.tool_calls) > 0:
+        return "flight_tools"
+    return "accomodation_node"    # you can change this to any other node name instead of "__end__"
+
+
+def accomodation_tools_condition(
+    state: Union[list[AnyMessage], dict[str, Any], BaseModel],
+    messages_key: str = "messages",
+) -> Literal["accomodation_tools", "activity_planner"]:
+    """Use in the conditional_edge to route to the ToolNode if the last message
+
+    has tool calls. Otherwise, route to the end.
+
+    Args:
+        state (Union[list[AnyMessage], dict[str, Any], BaseModel]): The state to check for
+            tool calls. Must have a list of messages (MessageGraph) or have the
+            "messages" key (StateGraph).
+
+    Returns:
+        The next node to route to.
+    """
+    if isinstance(state, list):
+        ai_message = state[-1]
+    elif isinstance(state, dict) and (messages := state.get(messages_key, [])):
+        ai_message = messages[-1]
+    elif messages := getattr(state, messages_key, []):
+        ai_message = messages[-1]
+    else:
+        raise ValueError(f"No messages found in input state to tool_edge: {state}")
+    if hasattr(ai_message, "tool_calls") and len(ai_message.tool_calls) > 0:
+        return "accomodation_tools"
+    return "activity_planner"    # you can change this to any other node name instead of "__end__"
+
+
+def activity_planner_tools_condition(
+    state: Union[list[AnyMessage], dict[str, Any], BaseModel],
+    messages_key: str = "messages",
+) -> Literal["activity_planner_tools", "realtime_provider"]:
+    """Use in the conditional_edge to route to the ToolNode if the last message
+
+    has tool calls. Otherwise, route to the end.
+
+    Args:
+        state (Union[list[AnyMessage], dict[str, Any], BaseModel]): The state to check for
+            tool calls. Must have a list of messages (MessageGraph) or have the
+            "messages" key (StateGraph).
+
+    Returns:
+        The next node to route to.
+    """
+    if isinstance(state, list):
+        ai_message = state[-1]
+    elif isinstance(state, dict) and (messages := state.get(messages_key, [])):
+        ai_message = messages[-1]
+    elif messages := getattr(state, messages_key, []):
+        ai_message = messages[-1]
+    else:
+        raise ValueError(f"No messages found in input state to tool_edge: {state}")
+    if hasattr(ai_message, "tool_calls") and len(ai_message.tool_calls) > 0:
+        return "activity_planner_tools"
+    return "realtime_provider"    # you can change this to any other node name instead of "__end__"
+
+
+
+#---------------------------------------------------------- Docling Tools ----------------------------------------------------------
+
+import time
+import os
+from docling.document_converter import DocumentConverter
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import (
+    AcceleratorDevice,
+    AcceleratorOptions,
+    PdfPipelineOptions
+)
+from docling.document_converter import DocumentConverter, PdfFormatOption
+
+# Base Input Schema
+class DoclingToolInput(BaseModel):
+    file_path: str = Field(..., description="Path to the PDF document")
+    max_threads: Optional[int] = Field(default=8, description="Number of processing threads")
+
+# Core PDF Processor
+class DoclingPDFProcessor:
+    def __init__(self, **processor_options):
+        self.processor_options = processor_options
+        
+    def process_pdf(self, file_path: str, max_threads: int = 8) -> Iterator[dict]:
+        """Core PDF processing pipeline"""
+        try:
+            print(f"🔍 Processing {os.path.basename(file_path)}")
+            start_time = time.time()
+            
+            # Configure processing pipeline
+            accelerator = AcceleratorOptions(
+                num_threads=max_threads,
+                device=AcceleratorDevice.AUTO
+            )
+            
+            pipeline_opts = PdfPipelineOptions(
+                **self.processor_options,
+                accelerator_options=accelerator
+            )
+            
+            # Execute conversion
+            converter = DocumentConverter(
+                format_options={
+                    InputFormat.PDF: PdfFormatOption(
+                        pipeline_options=pipeline_opts
+                    )
+                }
+            )
+            
+            docling_doc = converter.convert(file_path).document
+            processing_time = time.time() - start_time
+            
+            yield {
+                "content": docling_doc.export_to_markdown(),
+                "metadata": {
+                    "source": file_path,
+                    "processing_time": round(processing_time, 2),
+                    "options": self.processor_options
+                }
+            }
+            
+        except Exception as e:
+            yield {"error": str(e), "file": file_path}
+
+# Specific Tool Implementations
+class DoclingTextExtractorTool(DoclingPDFProcessor):
+    """Basic text extraction with OCR fallback"""
+    def __init__(self):
+        super().__init__(
+            do_ocr=True,
+            do_table_structure=False,
+            table_structure_options={"do_cell_matching": False}
+        )
+
+class DoclingTableExtractorTool(DoclingPDFProcessor):
+    """Structured table extraction"""
+    def __init__(self):
+        super().__init__(
+            do_ocr=False,
+            do_table_structure=True,
+            table_structure_options={"do_cell_matching": True}
+        )
+
+class DoclingFullProcessingTool(DoclingPDFProcessor):
+    """Comprehensive processing with OCR and tables"""
+    def __init__(self):
+        super().__init__(
+            do_ocr=True,
+            do_table_structure=True,
+            table_structure_options={"do_cell_matching": True}
+        )
+
+# Tool Factory
+def create_docling_tool(tool_class, name: str, description: str) -> Tool:
+    class _ToolInput(DoclingToolInput):
+        pass
+    
+    processor = tool_class()
+    
+    return Tool(
+        name=name,
+        description=description,
+        args_schema=_ToolInput,
+        func=lambda params: list(processor.process_pdf(
+            params["file_path"],
+            params.get("max_threads", 8)
+        ))
+    )
+
+# Create LangChain Tools
+text_extractor_tool = create_docling_tool(
+    DoclingTextExtractorTool,
+    name="docling_text_extractor",
+    description="Extracts text from PDFs with OCR fallback"
+)
+
+table_extractor_tool = create_docling_tool(
+    DoclingTableExtractorTool,
+    name="docling_table_extractor",
+    description="Extracts structured tables from PDF documents"
+)
+
+full_processor_tool = create_docling_tool(
+    DoclingFullProcessingTool,
+    name="docling_full_processor",
+    description="Comprehensive PDF processing with text, OCR, and table extraction"
 )
