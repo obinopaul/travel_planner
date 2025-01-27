@@ -20,103 +20,76 @@ from src.react_agent.state import InputState, OverallState, OutputState
 from src.react_agent.tools import TOOLS, AmadeusFlightSearchInput, AmadeusFlightSearchTool
 from src.react_agent.utils import load_chat_model
 from langgraph.prebuilt import tools_condition
-from src.react_agent.prompts import SYSTEM_PROMPT, PERSONAL_INFO_PROMPT, SYSTEM_PROMPT, FLIGHT_FINDER_PROMPT, ACCOMODATION_PROMPT, ACTIVITY_PLANNER_PROMPT
+from src.react_agent.prompts import SYSTEM_PROMPT, FLIGHT_FINDER_PROMPT, ACTIVITY_PLANNER_PROMPT
 
-from src.react_agent.agent import (create_tool_node_with_fallback, travel_itinerary_planner,
-                               create_llm_with_tools_node, activity_planner_node, flight_finder, accomodation_finder,
-                               activity_planner, realtime_provider, itinerary_generator, reat_time_data_node
-                                )
+from src.react_agent.agent import ( travel_itinerary_planner, flight_finder_tool_node,
+                                accommodation_finder_node, activities_node, ticketmaster_node, recommendations_node)
 
-from src.react_agent.tools import (TOOLS, amadeus_tool, amadeus_hotel_tool, geoapify_tool, weather_tool, 
-                                   googlemaps_tool, flight_tool, google_scholar_tool, booking_tool,
-                                   google_places_tool, google_find_place_tool, google_place_details_tool, tavily_search_tool,
-                                   flight_tools_condition, accomodation_tools_condition, activity_planner_tools_condition)
-# Define the function that calls the model
+from src.react_agent.tools import (TOOLS, amadeus_tool, amadeus_hotel_tool, geoapify_tool, weather_tool,  AmadeusFlightSearchInput,
+                                   FlightSearchInput,
+                                   googlemaps_tool, flight_tool, google_scholar_tool, booking_tool, tavily_search_tool,
+                                   flight_tools_condition, accomodation_tools_condition, activity_planner_tools_condition,
+                                   multiply_tool, GoogleMapsPlacesInput, google_places_tool, google_find_place_tool, google_place_details_tool,
+                                   google_events_tool, GoogleEventsSearchInput, TicketmasterEventSearchInput, ticketmaster_tool,)
 
+from langchain_core.runnables.graph import CurveStyle, MermaidDrawMethod, NodeStyles
+from datetime import date
+import logging
 
+# Suppress debug messages from ipywidgets
+logging.getLogger('ipywidgets').setLevel(logging.WARNING)
+logging.getLogger('comm').setLevel(logging.WARNING)
+logging.getLogger('tornado').setLevel(logging.WARNING)
+logging.getLogger('traitlets').setLevel(logging.WARNING)
 
-# Initialize the LLM
-llm = LangchainChatOpenAI(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    model= "deepseek-coder", # use deepseek-chat for DeepSeek V3 or deepseek-reasoner for DeepSeek R1, or deepseek-coder for DeepSeek Coder
-    base_url="https://api.deepseek.com",
-)
+# Disable all logging globally
+logging.disable(logging.CRITICAL)  # Disable all logging below CRITICAL level
 
-# Define the prompt for the agent
-prompt = ChatPromptTemplate.from_messages(
-    [
-        SystemMessage(content="Welcome to GradeMaster! Please provide your personal information, course details, and submission document."),
-        MessagesPlaceholder(variable_name="messages"),
-    ]
-)
+# Redirect all logging output to os.devnull
+logging.basicConfig(level=logging.CRITICAL, handlers=[logging.NullHandler()])
+
+# Suppress warnings as well (optional)
+import warnings
+warnings.filterwarnings("ignore")
 
 
 # Define a new graph
-builder = StateGraph(OverallState, input=InputState, output = OutputState, config_schema=Configuration)
-
-# ----------------------------------------- Add Node ---------------------------------------------------
+# ----------------------------------------- Nodes ---------------------------------------------------
+builder = StateGraph(OverallState, config_schema=Configuration)
 builder.add_node("interface", travel_itinerary_planner)
-
-# Flight Nodes
-flight_finder = create_llm_with_tools_node(llm, FLIGHT_FINDER_PROMPT, [amadeus_tool, flight_tool]) # Add the flight tools here
-builder.add_node("flight_node", flight_finder)
-builder.add_node("flight_tools", create_tool_node_with_fallback([amadeus_tool, flight_tool]))
-
-# Accomodation Nodes
-accomodation_finder = create_llm_with_tools_node(llm, ACCOMODATION_PROMPT, [amadeus_hotel_tool, booking_tool]) # Add the flight tools here
-builder.add_node("accomodation_node", accomodation_finder)
-builder.add_node("accomodation_tools", create_tool_node_with_fallback([amadeus_hotel_tool, booking_tool]))
-
-# Activity Planner Nodes
-activity_planner_tool = create_llm_with_tools_node(llm, ACTIVITY_PLANNER_PROMPT, [geoapify_tool, google_places_tool, tavily_search_tool]) # Add the flight tools here
-builder.add_node("activity_planner", activity_planner_node)
-builder.add_node("activity_planner_tools", activity_planner_tool)
-
-# real time data Node
-# Super Node Router
-builder.add_node("realtime_provider", realtime_provider)
+builder.add_node("flight_node", flight_finder_tool_node)
+builder.add_node("accomodation_node", accommodation_finder_node)
+builder.add_node("activities", activities_node)
+builder.add_node("live_events_node", ticketmaster_node)
+builder.add_node("recommendation_node", recommendations_node)
 
 
-# real time data Node
-builder.add_node("itinerary_generator", itinerary_generator)
-
-
-
-
-
-
-
-
-
-# ----------------------------------------- Add Edge ---------------------------------------------------
-# Define edges
+# ----------------------------------------- Edges ---------------------------------------------------
 builder.add_edge(START, "interface")
 builder.add_edge("interface", "flight_node")
-builder.add_conditional_edges(
-    "flight_node",
-    flight_tools_condition,
-)
-builder.add_edge("flight_tools", "flight_node")
+builder.add_edge("flight_node", "accomodation_node")
+builder.add_edge("accomodation_node", "activities")
+builder.add_edge("activities_node", "live_events_node")
+builder.add_edge("live_events_node", "recommendation_node")
+builder.add_edge("recommendation_node", END)
 
-builder.add_conditional_edges(
-    "accomodation_node",
-    accomodation_tools_condition,
-)
-builder.add_edge("accomodation_tools", "accomodation_node")
+# ---------------------------------------- Graph ---------------------------------------------------
+graph = builder.compile()
+graph.name = "Travel Itinerary Planner"
 
-builder.add_conditional_edges(
-    "activity_planner",
-    activity_planner_tools_condition,
-)
-builder.add_edge("activity_planner_tools", "activity_planner")
 
-builder.add_edge("activity_planner", "realtime_provider")
-builder.add_edge("realtime_provider", "itinerary_generator")
 
-builder.add_edge("itinerary_generator", END)
 
-graph = builder.compile(
-    interrupt_before=[],  # Add node names here to update state before they're called
-    interrupt_after=[],  # Add node names here to update state after they're called
-)
-graph.name = "ReAct Agent"  # This customizes the name in LangSmith
+# ----------------------------------------- Invoke the Graph ---------------------------------------------------
+# # **Input Collection**
+# user_input = """ I want to travel from Los Angeles to New York on 2025-2-15 and return on 2025-2-22 via La Guardia Airport. 
+# There is 1 adult. My budget is $5000. I need 1 room in The Bronx for 5 days. I prefer an AirBnB with free breakfast and a 
+# swimming pool. I also want to visit the museums and enjoy local cuisine, and go to the club at night. I might also want a massage.
+# """    
+
+
+# # **Input State**
+# input_state = {"messages": [HumanMessage(content=user_input)]}
+
+# # **Graph Invocation**
+# output = graph.invoke(input_state, {"recursion_limit": 3000})

@@ -86,7 +86,9 @@ class OverallState:
     "Stores the accommodation options found by the Accommodation Finder agent (hotels, Airbnb, hostels, etc.)."
     activities: Optional[List[Dict[str, Any]]] = None
     "Stores the activity options found by the Activity Planner agent."
-    recommendations: Optional[Dict[str, Any]] = None
+    live_events: Optional[List[Dict[str, Any]]] = None
+    "Stores live events found by the Real-Time Data Provider agent."
+    recommendations: Optional[List[Dict[str, Any]]] = None
     "Stores recommendations from the Real-Time Data Provider agent (e.g., car rental, weather, crime rates)."
     warnings: Optional[Dict[str, Any]] = None
     "Stores warnings from the Real-Time Data Provider agent (e.g., high crime areas, visa requirements)."

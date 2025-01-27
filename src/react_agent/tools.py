@@ -30,6 +30,7 @@ from langchain_core.messages import AnyMessage, HumanMessage
 from langchain.prompts.chat import ChatPromptTemplate
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
+from pydantic import BaseModel, Field, validator
 
 # LangChain Community
 from langchain_community.document_loaders import NeedleLoader
@@ -614,9 +615,9 @@ geoapify_tool = Tool(
 # Define Input Schema
 class WeatherSearchInput(BaseModel):
     location: str = Field(..., description="The location to get weather information for (e.g., 'New York').")
-    date: str = Field(..., description="The date for the weather forecast in YYYY-MM-DD format.")
+    date: Optional[str] = Field(None, description="The date for the weather forecast in YYYY-MM-DD format.")
 
-# Define the Tool
+# Define the WeatherSearchTool class
 class WeatherSearchTool:
     def __init__(self):
         self.api_key = os.getenv("OPENWEATHERMAP_API_KEY")
@@ -624,59 +625,66 @@ class WeatherSearchTool:
         if not self.api_key:
             raise ValueError("OpenWeatherMap API key is missing. Please set the OPENWEATHERMAP_API_KEY environment variable.")
 
-    def get_weather(self, location: str, date: str) -> str:
+    def get_weather(self, input: WeatherSearchInput) -> str:
         try:
-            # Geocode the location to get coordinates
-            geocoding_url = f"{self.base_url}/weather"
-            geocoding_params = {
-                "q": location,
-                "appid": self.api_key
-            }
-            geocoding_response = requests.get(geocoding_url, params=geocoding_params)
-            geocoding_data = geocoding_response.json()
-            
-            if geocoding_response.status_code != 200:
-                return f"Could not find coordinates for the location: {location}. Error: {geocoding_data.get('message', 'Unknown error')}"
-            
-            lat = geocoding_data['coord']['lat']
-            lon = geocoding_data['coord']['lon']
-            
-            # Get weather forecast for the specified date
-            forecast_url = f"{self.base_url}/onecall"
-            forecast_params = {
-                "lat": lat,
-                "lon": lon,
-                "exclude": "current,minutely,hourly,alerts",
-                "appid": self.api_key,
-                "units": "metric"  # Use metric units (Celsius)
-            }
-            forecast_response = requests.get(forecast_url, params=forecast_params)
-            forecast_data = forecast_response.json()
-            
-            if forecast_response.status_code != 200:
-                return f"Could not fetch weather data. Error: {forecast_data.get('message', 'Unknown error')}"
-            
-            # Find the weather for the specified date
-            target_date = datetime.strptime(date, "%Y-%m-%d").date()
-            for daily_data in forecast_data.get('daily', []):
-                forecast_date = datetime.fromtimestamp(daily_data['dt']).date()
-                if forecast_date == target_date:
-                    weather = daily_data['weather'][0]['description']
-                    temp_min = daily_data['temp']['min']
-                    temp_max = daily_data['temp']['max']
-                    humidity = daily_data['humidity']
-                    return (
-                        f"Weather in {location} on {date}:\n"
-                        f"Description: {weather}\n"
-                        f"Temperature: {temp_min}°C to {temp_max}°C\n"
-                        f"Humidity: {humidity}%"
-                    )
-            return f"No weather data found for {location} on {date}."
+            # Step 1: Get current weather or forecast for the specified location
+            if input.date:
+                # Use the forecast endpoint for future dates
+                forecast_url = f"{self.base_url}/forecast"
+                forecast_params = {
+                    "q": input.location,
+                    "appid": self.api_key,
+                    "units": "metric"  # Use metric units (Celsius)
+                }
+                forecast_response = requests.get(forecast_url, params=forecast_params)
+                forecast_data = forecast_response.json()
+
+                if forecast_response.status_code != 200:
+                    return f"Could not fetch weather data. Error: {forecast_data.get('message', 'Unknown error')}"
+
+                # Find the weather for the specified date
+                target_date = datetime.strptime(input.date, "%Y-%m-%d").date()
+                for forecast in forecast_data.get('list', []):
+                    forecast_date = datetime.fromtimestamp(forecast['dt']).date()
+                    if forecast_date == target_date:
+                        weather = forecast['weather'][0]['description']
+                        temp_min = forecast['main']['temp_min']
+                        temp_max = forecast['main']['temp_max']
+                        humidity = forecast['main']['humidity']
+                        return (
+                            f"Weather in {input.location} on {input.date}:\n"
+                            f"Description: {weather}\n"
+                            f"Temperature: {temp_min}°C to {temp_max}°C\n"
+                            f"Humidity: {humidity}%"
+                        )
+                return f"No weather data found for {input.location} on {input.date}."
+            else:
+                # Use the weather endpoint for current weather
+                weather_url = f"{self.base_url}/weather"
+                weather_params = {
+                    "q": input.location,
+                    "appid": self.api_key,
+                    "units": "metric"  # Use metric units (Celsius)
+                }
+                weather_response = requests.get(weather_url, params=weather_params)
+                weather_data = weather_response.json()
+
+                if weather_response.status_code != 200:
+                    return f"Could not fetch weather data. Error: {weather_data.get('message', 'Unknown error')}"
+
+                weather = weather_data['weather'][0]['description']
+                temp = weather_data['main']['temp']
+                humidity = weather_data['main']['humidity']
+                return (
+                    f"Current weather in {input.location}:\n"
+                    f"Description: {weather}\n"
+                    f"Temperature: {temp}°C\n"
+                    f"Humidity: {humidity}%"
+                )
         except Exception as e:
             return f"An error occurred: {str(e)}"
 
-
-# # Create the LangChain Tool
+# Create the LangChain Tool
 weather_tool = Tool(
     name="Weather Search",
     func=WeatherSearchTool().get_weather,
@@ -1183,7 +1191,7 @@ class BookingScraperTool:
         self.base_url = "https://www.booking.com/searchresults.html"
         self.session = requests.Session()
 
-    def search(self, location: str, checkin_date: str, checkout_date: str, adults: int, rooms: int, currency: str) -> List[Dict]:
+    def search(self, input: BookingSearchInput) -> List[Dict]:
         """
         Scrape hotel data from Booking.com based on the provided input parameters.
         Args:
@@ -1198,13 +1206,13 @@ class BookingScraperTool:
         """
         # Define search parameters
         params = {
-            'ss': location,
+            'ss': input.location,
             'dest_type': 'city',
-            'checkin': checkin_date,
-            'checkout': checkout_date,
-            'group_adults': adults,
-            'no_rooms': rooms,
-            'selected_currency': currency
+            'checkin': input.checkin_date,
+            'checkout': input.checkout_date,
+            'group_adults': input.adults,
+            'no_rooms': input.rooms,
+            'selected_currency': input.currency
         }
 
         # Define headers to mimic a real browser request
@@ -1410,7 +1418,7 @@ class GoogleMapsAddressValidationTool:
     A tool to call the Google Maps Address Validation API by direct POST request.
     (As the googlemaps library doesn't implement it directly.)
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("GOOGLE_MAPS_API_KEY")
         if not self.api_key:
             raise ValueError("GOOGLE_MAPS_API_KEY environment variable is missing.")
@@ -1520,7 +1528,7 @@ class GoogleMapsStaticMapTool:
     A tool to call googlemaps.Client.static_map(...) 
     returning an iterable of image bytes.
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("GOOGLE_MAPS_API_KEY")
         if not self.api_key:
             raise ValueError("GOOGLE_MAPS_API_KEY environment variable is missing.")
@@ -1609,7 +1617,7 @@ class GoogleMapsRoadsTool:
     A tool to call the Google Maps Roads API via googlemaps.Client:
       - snap_to_roads, nearest_roads, speed_limits, snapped_speed_limits
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("GOOGLE_MAPS_API_KEY")
         if not self.api_key:
             raise ValueError("GOOGLE_MAPS_API_KEY environment variable is missing.")
@@ -1683,7 +1691,7 @@ class GoogleMapsTimeZoneTool:
     """
     A tool to call the Google Maps Time Zone API via googlemaps.Client.timezone(...).
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("GOOGLE_MAPS_API_KEY")
         if not self.api_key:
             raise ValueError("GOOGLE_MAPS_API_KEY environment variable is missing.")
@@ -1738,9 +1746,9 @@ class GoogleMapsPlacesInput(BaseModel):
         None,
         description="Radius in meters for nearby or text search."
     )
-    type: Optional[str] = Field(
+    type: Optional[List[str]] = Field(  # Changed to List[str]
         None,
-        description="Type of place, e.g., 'restaurant'."
+        description="List of types of place, e.g., ['restaurant', 'museum']."
     )
     language: Optional[str] = Field(
         None,
@@ -1789,7 +1797,7 @@ class GoogleMapsPlacesTool:
       - places_nearby(...)
       - place(...)
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("GOOGLE_MAPS_API_KEY")
         if not self.api_key:
             raise ValueError("GOOGLE_MAPS_API_KEY environment variable is missing.")
@@ -1949,7 +1957,7 @@ class GoogleMapsGeolocationTool:
     """
     A tool to call the Google Maps Geolocation API via googlemaps.Client.geolocate().
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("GOOGLE_MAPS_API_KEY")
         if not self.api_key:
             raise ValueError("GOOGLE_MAPS_API_KEY environment variable is missing.")
@@ -2030,7 +2038,7 @@ class GoogleMapsGeocodingTool:
     """
     A tool to call the Google Maps Geocoding API via googlemaps.Client.
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("GOOGLE_MAPS_API_KEY")
         if not self.api_key:
             raise ValueError("GOOGLE_MAPS_API_KEY environment variable is missing.")
@@ -2100,7 +2108,7 @@ class GoogleMapsElevationTool:
     """
     A tool to call the Google Maps Elevation API via googlemaps.Client.
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("GOOGLE_MAPS_API_KEY")
         if not self.api_key:
             raise ValueError("GOOGLE_MAPS_API_KEY environment variable is missing.")
@@ -2203,7 +2211,7 @@ class GoogleMapsDistanceMatrixTool:
     """
     A tool to call the Google Maps Distance Matrix API via googlemaps.Client.
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("GOOGLE_MAPS_API_KEY")
         if not self.api_key:
             raise ValueError("GOOGLE_MAPS_API_KEY environment variable is missing.")
@@ -2325,7 +2333,7 @@ class GoogleMapsDirectionsTool:
     """
     A tool to call the Google Maps Directions API via googlemaps.Client.
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("GOOGLE_MAPS_API_KEY")
         if not self.api_key:
             raise ValueError("GOOGLE_MAPS_API_KEY environment variable is missing.")
@@ -2410,7 +2418,7 @@ class YelpBusinessSearchTool:
     """
     A tool to call the Yelp Business Search endpoint.
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("YELP_API_KEY")
         if not self.api_key:
             raise ValueError("YELP_API_KEY environment variable is missing.")
@@ -2485,7 +2493,7 @@ class YelpPhoneSearchTool:
     """
     A tool to call the Yelp Phone Search endpoint.
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("YELP_API_KEY")
         if not self.api_key:
             raise ValueError("YELP_API_KEY environment variable is missing.")
@@ -2539,7 +2547,7 @@ class YelpBusinessDetailsTool:
     """
     A tool to call the Yelp Business Details endpoint: /businesses/{id}
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("YELP_API_KEY")
         if not self.api_key:
             raise ValueError("YELP_API_KEY environment variable is missing.")
@@ -2588,7 +2596,7 @@ class YelpBusinessReviewsTool:
     """
     A tool to call the Yelp Business Reviews endpoint: /businesses/{id}/reviews
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("YELP_API_KEY")
         if not self.api_key:
             raise ValueError("YELP_API_KEY environment variable is missing.")
@@ -2642,7 +2650,7 @@ class YelpEventsSearchTool:
     """
     A tool to call the Yelp Events search endpoint: /events
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("YELP_API_KEY")
         if not self.api_key:
             raise ValueError("YELP_API_KEY environment variable is missing.")
@@ -2705,7 +2713,7 @@ class YelpGraphQLTool:
     """
     A tool that hits the Yelp GraphQL endpoint with a user-provided query.
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("YELP_API_KEY")
         if not self.api_key:
             raise ValueError("YELP_API_KEY environment variable is missing.")
@@ -2760,7 +2768,7 @@ class YouTubeSearchTool:
     """
     A tool to call the YouTube Data API /search endpoint.
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("YOUTUBE_API_KEY")
         if not self.api_key:
             raise ValueError("YOUTUBE_API_KEY environment variable is missing.")
@@ -2824,7 +2832,7 @@ class YouTubeVideosTool:
     """
     A tool to call the YouTube Data API /videos endpoint for retrieving video details.
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("YOUTUBE_API_KEY")
         if not self.api_key:
             raise ValueError("YOUTUBE_API_KEY environment variable is missing.")
@@ -2889,7 +2897,7 @@ class YouTubeCommentThreadsTool:
     """
     A tool to call the YouTube Data API /commentThreads endpoint.
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("YOUTUBE_API_KEY")
         if not self.api_key:
             raise ValueError("YOUTUBE_API_KEY environment variable is missing.")
@@ -2955,7 +2963,7 @@ class YouTubePlaylistItemsTool:
     """
     A tool to call the YouTube Data API /playlistItems endpoint.
     """
-    def init(self):
+    def __init__(self):
         self.api_key = os.getenv("YOUTUBE_API_KEY")
         if not self.api_key:
             raise ValueError("YOUTUBE_API_KEY environment variable is missing.")
@@ -3216,4 +3224,241 @@ full_processor_tool = create_docling_tool(
     DoclingFullProcessingTool,
     name="docling_full_processor",
     description="Comprehensive PDF processing with text, OCR, and table extraction"
+)
+
+
+#---------------------------------------------------------- Google Events Tools ----------------------------------------------------------
+
+from typing import Dict, List, Optional
+from pydantic import BaseModel, Field
+import os
+import requests
+
+# Define Input Schema
+# Define Input Schema
+class GoogleEventsSearchInput(BaseModel):
+    query: str = Field(..., description="The search query for Google Events (e.g., 'Events in Austin').")
+    location: Optional[str] = Field(None, description="The geographic location for the search (e.g., 'Austin, TX').")
+    uule: Optional[str] = Field(None, description="The Google encoded location for the search.")
+    gl: Optional[str] = Field(None, description="The country code for localization (e.g., 'us' for the United States).")
+    hl: Optional[str] = Field(None, description="The language code for localization (e.g., 'en' for English).")
+    start: Optional[int] = Field(None, description="The result offset for pagination (e.g., 0 for the first page).")
+    htichips: Optional[str] = Field(None, description="Advanced filters for events (parameters include date:today, date:tomorrow, date:week, date:today, date:next_week, date:month, date:next_month, event_type:Virtual-Event (e.g., 'event_type:Virtual-Event,date:today').")
+    no_cache: Optional[bool] = Field(None, description="Disallow results from the cache if set to True.")
+    async_: Optional[bool] = Field(None, description="Submit search asynchronously if set to True.")
+    zero_trace: Optional[bool] = Field(None, description="Enable ZeroTrace mode (Enterprise only).")
+    output: Optional[str] = Field(None, description="The output format (e.g., 'json' or 'html').")
+
+# Define the Tool
+class GoogleEventsSearchTool:
+    def __init__(self):
+        self.api_key = os.getenv("SERPAPI_API_KEY")
+        self.base_url = "https://serpapi.com/search"
+        if not self.api_key:
+            raise ValueError("SerpApi API key is missing. Please set the SERPAPI_API_KEY environment variable.")
+
+    def search_events(
+        self,
+        input: GoogleEventsSearchInput,
+    ) -> Dict[str, Any]:
+        """
+        Search Google Events using the SerpApi service.
+
+        Args:
+            query: The search query.
+            location: The geographic location for the search.
+            uule: The Google encoded location for the search.
+            gl: The country code for localization.
+            hl: The language code for localization.
+            start: The result offset for pagination.
+            htichips: Advanced filters for events.
+            no_cache: Disallow results from the cache.
+            async_: Submit search asynchronously.
+            zero_trace: Enable ZeroTrace mode (Enterprise only).
+            output: The output format (e.g., 'json' or 'html').
+
+        Returns:
+            A dictionary containing the search results.
+        """
+        try:
+            # Prepare the parameters for the API request
+            params = {
+                "engine": "google_events",
+                "q": input.query,
+                "api_key": self.api_key,
+                "output": input.output or "json",
+            }
+
+            # Add optional parameters if provided
+            if input.location:
+                params["location"] = input.location
+            if input.uule:
+                params["uule"] = input.uule
+            if input.gl:
+                params["gl"] = input.gl
+            if input.hl:
+                params["hl"] = input.hl
+            if input.start:
+                params["start"] = input.start
+            if input.htichips:
+                params["htichips"] = input.htichips
+            if input.no_cache:
+                params["no_cache"] = "true" if input.no_cache else "false"
+            if input.async_:
+                params["async"] = "true" if input.async_ else "false"
+            if input.zero_trace:
+                params["zero_trace"] = "true" if input.zero_trace else "false"
+
+            # Make the API request
+            response = requests.get(self.base_url, params=params)
+            response.raise_for_status()  # Raise an exception for HTTP errors
+
+            # Parse the JSON response
+            results = response.json()
+
+            # Extract relevant information from the results
+            events_results = results.get("events_results", [])
+            simplified_results = []
+            for event in events_results:
+                simplified_results.append({
+                    "title": event.get("title"),
+                    "date": event.get("date", {}).get("when"),
+                    "address": event.get("address", []),
+                    "link": event.get("link"),
+                    "description": event.get("description"),
+                    "ticket_info": event.get("ticket_info", []),
+                    "venue": event.get("venue", {}).get("name"),
+                    "thumbnail": event.get("thumbnail"),
+                })
+
+            return {
+                "search_metadata": results.get("search_metadata", {}),
+                "events_results": simplified_results,
+                "pagination": results.get("pagination", {}),
+            }
+
+        except requests.exceptions.RequestException as e:
+            return {"error": f"An error occurred while making the API request: {str(e)}"}
+        except Exception as e:
+            return {"error": f"An unexpected error occurred: {str(e)}"}
+
+google_events_tool = Tool(
+    name="Google Events Search",
+    func=GoogleEventsSearchTool().search_events,
+    description="Provides event results from Google Events, including titles, dates, addresses, links, descriptions, ticket info, venues, and thumbnails.",
+    args_schema=GoogleEventsSearchInput
+)
+
+
+#---------------------------------------------------------- TicketMaster ----------------------------------------------------------
+# Define the input schema for the Ticketmaster API tool
+class TicketmasterEventSearchInput(BaseModel):
+    keyword: Optional[str] = Field(default=None, description="Keyword to search for events (e.g., artist, event name).")
+    city: Optional[str] = Field(default=None, description="Filter events by city.")
+    country_code: Optional[str] = Field(default=None, description="Filter events by country code (ISO Alpha-2 Code).")
+    classification_name: Optional[str] = Field(default=None, description="Filter by classification (e.g., 'Music').")
+    start_date_time: Optional[str] = Field(default=None, description="Start date filter in ISO8601 format (YYYY-MM-DDTHH:mm:ssZ).")
+    end_date_time: Optional[str] = Field(default=None, description="End date filter in ISO8601 format (YYYY-MM-DDTHH:mm:ssZ).")
+    size: int = Field(default=10, description="Number of events to return per page.")
+    page: int = Field(default=0, description="Page number to retrieve.")
+    sort: Optional[str] = Field(default="relevance,desc", description="Sorting order of the search results.")
+
+    @validator('start_date_time', 'end_date_time')
+    def validate_date_format(cls, v):
+        if v and "T" not in v:
+            raise ValueError("Datetime must be in ISO8601 format (e.g., 'YYYY-MM-DDTHH:mm:ssZ').")
+        return v
+
+# Define the Ticketmaster API tool
+class TicketmasterAPITool:
+    def __init__(self):
+        self.base_url = "https://app.ticketmaster.com/discovery/v2"
+        self.api_key = os.getenv("TICKETMASTER_API_KEY")  # Set your Ticketmaster API key here
+        if not self.api_key:
+            raise ValueError("Ticketmaster API key is missing. Please set TICKETMASTER_API_KEY environment variable.")
+
+    def _make_request(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Helper method to make API requests to Ticketmaster.
+        """
+        params = params or {}
+        params["apikey"] = self.api_key  # Add the API key to the request parameters
+        url = f"{self.base_url}/{endpoint}"
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            error_message = e.response.json().get("fault", {}).get("faultstring", "HTTP error occurred")
+            raise ValueError(f"HTTP error: {error_message}")
+        except Exception as e:
+            raise Exception(f"An unexpected error occurred: {str(e)}")
+
+    def search_events(
+        self,
+        input: TicketmasterEventSearchInput,
+    ) -> str:
+        """
+        Search for events using the Ticketmaster Discovery API.
+        """
+        params = {
+            "keyword": input.keyword,
+            "city": input.city,
+            "countryCode": input.country_code,
+            "classificationName": input.classification_name,
+            "startDateTime": input.start_date_time,
+            "endDateTime": input.end_date_time,
+            "size": input.size,
+            "page": input.page,
+            "sort": input.sort,
+        }
+        # Remove None values from params
+        params = {k: v for k, v in params.items() if v is not None}
+
+        try:
+            data = self._make_request("events.json", params=params)
+            events = data.get("_embedded", {}).get("events", [])
+            results = []
+            for event in events:
+                event_details = {
+                    "Event": event.get("name"),
+                    "Date": event.get("dates", {}).get("start", {}).get("localDate"),
+                    "Time": event.get("dates", {}).get("start", {}).get("localTime"),
+                    "Venue": event["_embedded"]["venues"][0].get("name") if "_embedded" in event and "venues" in event["_embedded"] else None,
+                    "City": event["_embedded"]["venues"][0]["city"].get("name") if "_embedded" in event and "venues" in event["_embedded"] else None,
+                    "Country": event["_embedded"]["venues"][0]["country"].get("name") if "_embedded" in event and "venues" in event["_embedded"] else None,
+                    "Url": event.get("url"),
+                }
+                results.append(event_details)
+            return results
+        except Exception as e:
+            raise Exception(f"An error occurred while searching for events: {str(e)}")
+
+    def get_event_details(self, event_id: str) -> Dict[str, Any]:
+        """
+        Retrieve details for a specific event by its ID.
+        """
+        try:
+            data = self._make_request(f"events/{event_id}.json")
+            event = data
+            event_details = {
+                "Event": event.get("name"),
+                "Date": event.get("dates", {}).get("start", {}).get("localDate"),
+                "Time": event.get("dates", {}).get("start", {}).get("localTime"),
+                "Venue": event["_embedded"]["venues"][0].get("name") if "_embedded" in event and "venues" in event["_embedded"] else None,
+                "City": event["_embedded"]["venues"][0]["city"].get("name") if "_embedded" in event and "venues" in event["_embedded"] else None,
+                "Country": event["_embedded"]["venues"][0]["country"].get("name") if "_embedded" in event and "venues" in event["_embedded"] else None,
+                "Url": event.get("url"),
+            }
+            return event_details
+        except Exception as e:
+            raise Exception(f"An error occurred while retrieving event details: {str(e)}")
+
+
+# Define the Tool
+ticketmaster_tool = Tool(
+    name="Eventbrite Event Search",
+    func=TicketmasterAPITool().search_events,
+    description="Searches for events using the Eventbrite API.",
+    args_schema=TicketmasterEventSearchInput,
 )

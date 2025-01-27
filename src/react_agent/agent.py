@@ -24,6 +24,7 @@ import ipywidgets as widgets
 from IPython.display import display
 from src.react_agent.state import OverallState
 import os 
+import re
 import json
 from datetime import date
 from pydantic import BaseModel, Field
@@ -32,13 +33,14 @@ from langchain.tools import BaseTool, Tool
 from langchain_core.runnables import Runnable
 from src.react_agent.configuration import Configuration
 from src.react_agent.state import InputState, OverallState, OutputState
-from src.react_agent.prompts import PERSONAL_INFO_PROMPT, USER_PROMPT, SYSTEM_PROMPT
+from src.react_agent.prompts import SYSTEM_PROMPT, ACTIVITY_PLANNER_PROMPT, FLIGHT_FINDER_PROMPT, RECOMMENDATION_PROMPT
 
 from src.react_agent.tools import (TOOLS, amadeus_tool, amadeus_hotel_tool, geoapify_tool, weather_tool, 
                                    googlemaps_tool, flight_tool, google_scholar_tool, booking_tool,
-                                   google_places_tool, google_find_place_tool, google_place_details_tool, tavily_search_tool,
+                                   google_places_tool,tavily_search_tool,
                                    flight_tools_condition, accomodation_tools_condition, activity_planner_tools_condition, 
-                                   FlightSearchInput, AmadeusFlightSearchInput)
+                                   FlightSearchInput, AmadeusFlightSearchInput, BookingSearchInput, GoogleMapsPlacesInput,
+                                   TicketmasterEventSearchInput, ticketmaster_tool)
 
 from src.react_agent.utils import load_chat_model
 from langchain_core.tools import tool
@@ -199,9 +201,6 @@ def flight_finder_tool_node(state: OverallState) -> OverallState:
         
             google_flights_results = flight_tool.func(flight_search_input)
 
-            # Debugging: Print the raw API response
-            print(f"API Response for {flight_class}: {google_flights_results}")
-
             # Add the results to the temporary dictionary under the travel class key
             flights_dict[flight_class] = google_flights_results
             
@@ -215,523 +214,491 @@ def flight_finder_tool_node(state: OverallState) -> OverallState:
     # Return the updated state
     return state
 
-
-
-#--------------------------------------------Chat Node --------------------------------------------
-# (uses conversational agent and returns a JSON format)
-# extracts user preferences and requirements from the conversation
-
-def chat_node(state: OverallState) -> OverallState:
-    """
-    Node to interact with the user, collect personal info, course info,
-    and submission document, and save it to the state.
-    """
-    llm = LangchainChatDeepSeek(
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-        model= "deepseek-chat",
-        base_url="https://api.deepseek.com",
-        )
-    try:
-        # Initialize the conversation if no messages exist
-        if not state.messages:
-            state.messages = [
-                SystemMessage(content="Welcome! Please provide your travel preferences.")
-            ]
-        
-        # Check if the last message is from the user (HumanMessage)
-        if state.messages and isinstance(state.messages[-1], HumanMessage):
-            # Extract the user's message
-            user_message = state.messages[-1].content
-            
-            # Update user preferences based on the chat
-            state.user_preferences.update({"chat_preferences": user_message})
-            
-            # Prepare the context for the LLM
-            context = {
-                "location": state.location,
-                "destination": state.destination,
-                "start_date": state.start_date,
-                "end_date": state.end_date,
-                "num_adults": state.num_adults,
-                "num_children": state.num_children,
-                "num_rooms": state.num_rooms,
-                "num_rooms": state.num_rooms,
-                "user_preferences": state.user_preferences
-            }
-            
-            # Invoke the LLM with the current state and context
-            response = llm.invoke([SystemMessage(content=str(context)), HumanMessage(content=user_message)])
-            
-            # Append the LLM's response as an Assistant Message (AIMessage)
-            state.messages.append(AIMessage(content=response.content))  # Assuming `response` has a `content` attribute
-        
-        return state
-    except Exception as e:
-        # Handle errors gracefully
-        state.messages = state.messages + [SystemMessage(content=f"An error occurred: {str(e)}")]
-        state.next_node = "__end__"  # End the workflow if an error occurs
-        return state
-    
-#--------------------------------------------Flight Tool Node --------------------------------------------
-
-
-from langchain_core.messages import ToolMessage
-from langchain_core.runnables import RunnableLambda
-from langgraph.prebuilt import ToolNode
-
-def create_tool_node_with_fallback(tools: list) -> OverallState:
-    
-    def handle_tool_error(state) -> OverallState:
-        error = state.get("error")
-        tool_calls = state["messages"][-1].tool_calls
-        return {
-            "messages": [
-                ToolMessage(
-                    content=f"Error: {repr(error)}\n please fix your mistakes.",
-                    tool_call_id=tc["id"],
-                    )
-                for tc in tool_calls
-                ]
-            }
-    return ToolNode(tools).with_fallbacks(
-        [RunnableLambda(handle_tool_error)], exception_key="error"
-        )
-
-
-
-
-
-
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import Runnable
-from langchain_openai import ChatOpenAI
-
-from langchain.prompts import ChatPromptTemplate
-from langchain.schema.runnable import Runnable
-
-def create_llm_with_tools_node(llm, system_prompt: str, tools: list):
-    """
-    Creates an Assistant class that uses an LLM with tool binding.
-    
-    Args:
-        llm: The LLM to use (e.g., ChatOpenAI).
-        system_prompt: The system prompt for the LLM.
-        tools: A list of tools to bind to the LLM.
-    
-    Returns:
-        A callable Assistant class that can be used as a node.
-    """
-    # Define the assistant class
-    class Assistant:
-        def __init__(self, runnable: Runnable):
-            # Initialize with the runnable that defines the process for interacting with the tools
-            self.runnable = runnable
-
-        def __call__(self, state: OverallState) -> OverallState:
-            while True:
-                # Define the human message (query) based on the state
-                query = f"""
-                The user wants to travel from {state.loc_code} to {state.dest_code}. 
-                The trip starts on {state.start_date} and ends on {state.end_date}. 
-                The user is traveling with {state.num_adults} adults and {state.num_children} children. 
-                The budget for flights is {state.budget}, 
-                Travel class: {state.travel_class},  # Use state.travel_class here, 
-                Additional preferences include: {state.user_preferences}.
-                """
-                
-                # Combine the system prompt, human message (query), and existing state messages
-                structured_prompt = ChatPromptTemplate.from_messages(
-                                [
-                                    SystemMessage(content=system_prompt),
-                                    HumanMessage(content=query),
-                                    MessagesPlaceholder(variable_name="messages"),
-                                ]
-                        )
-
-                # Format the structured prompt with the required variables
-                formatted_prompt = structured_prompt.format(messages=state.messages)
-
-                # Update the state with the formatted prompt
-                updated_state = OverallState(
-                    loc_code=state.loc_code,
-                    dest_code=state.dest_code,
-                    start_date=state.start_date,
-                    end_date=state.end_date,
-                    num_adults=state.num_adults,
-                    num_children=state.num_children,
-                    budget=state.budget,
-                    user_preferences=state.user_preferences,
-                    travel_class=state.travel_class,
-                    messages=formatted_prompt,  # Update messages with the formatted prompt
-                )
-                
-                # Invoke the runnable with the updated state
-                result = self.runnable.invoke(updated_state)
-                
-                # If the tool fails to return valid output, re-prompt the user to clarify or retry
-                if not result.tool_calls and (
-                    not result.content
-                    or isinstance(result.content, list)
-                    and not result.content[0].get("text")
-                ):
-                    # Add a message to request a valid response
-                    updated_state.messages = "Please provide more details or clarify your request."
-                else:
-                    # Break the loop when valid output is obtained
-                    break
-
-            # Return the final state after processing the runnable
-            return updated_state
-
-    # Define the assistant's prompt
-    primary_assistant_prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", system_prompt),
-            ("placeholder", "{messages}"),
-        ]
-    )
-    
-    # Bind the tools to the assistant's workflow
-    assistant_runnable = primary_assistant_prompt | llm.bind_tools(tools)
-    
-    # Return the Assistant class
-    return Assistant(assistant_runnable)
-
-
 #-------------------------------------------- Accommodation Finder --------------------------------------------
 
+# Define the structured output for the accommodation finder
+class AccommodationOutput(BaseModel):
+    location: str = Field(..., description="The exact location or neighborhood where the traveler wants to stay (e.g., 'Brooklyn').")
+    checkin_date: str = Field(..., description="The check-in date in YYYY-MM-DD format.")
+    checkout_date: str = Field(..., description="The check-out date in YYYY-MM-DD format.")
+    adults: int = Field(default=2, description="The number of adult guests.")
+    rooms: int = Field(default=1, description="The number of rooms.")
+    currency: str = Field(default="USD", description="The currency for the prices.")
 
-
-#-------------------------------------------- Activity Planner --------------------------------------------
-
-def activity_planner_node(state: OverallState) -> OverallState:
+def accommodation_finder_node(state: OverallState) -> OverallState:
     """
-    Node to plan activities using a React agent and tools like Google Places.
-    Updates the state with a structured output of activities and places.
+    This node extracts accommodation details from the user's query in state.messages
+    and returns a structured output that can be passed to the booking tool.
     """
-    # Define the LLM
-    llm = LangchainChatDeepSeek(
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-        model= "deepseek-chat",
-        base_url="https://api.deepseek.com",
-        )
+    llm_with_structure = llm.with_structured_output(AccommodationOutput)
 
-    # Define the tools (e.g., Google Places, Tavily Search, etc.)
-    tools = [
-        google_places_tool,  # Replace with actual Google Places tool
-        tavily_search_tool,  # Replace with actual Tavily Search tool
-    ]
+    # Define the prompt template
+    prompt = PromptTemplate(
+        template="""
+        You are an advanced travel planner assistant. Your task is to extract accommodation details
+        from the traveler's query. Use the following information to generate a structured output for
+        booking accommodations:
 
-    # Define the detailed prompt for the React agent
-    react_agent_prompt = PromptTemplate.from_template(
-        '''You are a helpful travel activity planner. Your job is to suggest activities and places for users based on their preferences.
-        Use the tools provided to find information about activities and places. Return a structured output in the following format:
-        {
-            "activities": [
-                {
-                    "name": "Activity Name",
-                    "description": "Description of the activity",
-                    "places": [
-                        {
-                            "name": "Place Name",
-                            "address": "Place Address",
-                            "rating": "Place Rating"
-                        }
-                    ]
-                }
-            ]
-        }
+        ### Traveler Query:
+        {query}
 
-        Tools:
-        {tools}
+        ### Instructions:
+        1. Extract the exact location or neighborhood where the traveler wants to stay (e.g., "Brooklyn").
+           - If the traveler does not specify a location, use the city or city code provided in the state.
+        2. Extract the check-in and check-out dates from the query.
+           - If the dates are not explicitly mentioned, use the default dates from the state.
+        3. Extract the number of adults and rooms from the query.
+           - If not specified, use the default values: 1 adult and 1 room.
+        4. Use the default currency 'USD' unless specified otherwise.
+        5. Return the structured output in the following format:
+           - location: The exact location or neighborhood.
+           - checkin_date: The check-in date in YYYY-MM-DD format.
+           - checkout_date: The check-out date in YYYY-MM-DD format.
+           - adults: The number of adult guests.
+           - rooms: The number of rooms.
+           - currency: The currency for the prices.
 
-        Use the following format:
-        Question: the input question you must answer
-        Thought: you should always think about what to do
-        Action: the action you should take, should be one of [{tool_names}]
-        Action Input: the input to the action
-        Observation: the result of the action
-        Thought: I now know the final answer
-        Final Answer: [Your final answer here as a structured JSON object]
-
-        Examples:
-        1. Question: What are some fun activities in New York City?
-           Thought: I should search for popular activities in New York City.
-           Action: google_places_tool
-           Action Input: {"query": "popular activities in New York City"}
-           Observation: [{"name": "Central Park", "description": "A large, iconic park in Manhattan.", "places": [{"name": "Central Park Zoo", "address": "64th St and 5th Ave, New York, NY 10021", "rating": "4.5"}]}]
-           Thought: I now know the final answer.
-           Final Answer: {
-               "activities": [
-                   {
-                       "name": "Central Park",
-                       "description": "A large, iconic park in Manhattan.",
-                       "places": [
-                           {
-                               "name": "Central Park Zoo",
-                               "address": "64th St and 5th Ave, New York, NY 10021",
-                               "rating": "4.5"
-                           }
-                       ]
-                   }
-               ]
-           }
-
-        2. Question: What are some historical places to visit in Washington, D.C.?
-           Thought: I should search for historical places in Washington, D.C.
-           Action: tavily_search_tool
-           Action Input: {"query": "historical places in Washington, D.C."}
-           Observation: [{"name": "Lincoln Memorial", "description": "A national monument built to honor Abraham Lincoln.", "places": [{"name": "Lincoln Memorial", "address": "2 Lincoln Memorial Cir NW, Washington, DC 20037", "rating": "4.8"}]}]
-           Thought: I now know the final answer.
-           Final Answer: {
-               "activities": [
-                   {
-                       "name": "Lincoln Memorial",
-                       "description": "A national monument built to honor Abraham Lincoln.",
-                       "places": [
-                           {
-                               "name": "Lincoln Memorial",
-                               "address": "2 Lincoln Memorial Cir NW, Washington, DC 20037",
-                               "rating": "4.8"
-                           }
-                       ]
-                   }
-               ]
-           }
-
-        Begin!
-        Question: {input}
-        Thought: {agent_scratchpad}
-        '''
+        ### Example Output:
+        - location: "Brooklyn"
+        - checkin_date: "2023-12-01"
+        - checkout_date: "2023-12-10"
+        - adults: 2
+        - rooms: 1
+        - currency: "USD"
+        """,
+        input_variables=["query"]
     )
 
+    # Create the chain
+    chain = prompt | llm_with_structure
+
+    # Extract the user's query from state.messages
+    query = state.messages[-1].content  # Assuming the last message is the user's query
+
+    # Invoke the chain to generate the structured output
+    structured_output = chain.invoke({"query": query})
+
+    # Call Google Flights Search Tool        
+    booking_search_input = BookingSearchInput(
+        location=structured_output.location,
+        checkin_date=structured_output.checkin_date,
+        checkout_date=structured_output.checkout_date,
+        adults=structured_output.adults,
+        rooms=structured_output.rooms,
+        currency=structured_output.currency,
+    )
+
+    booking_results = booking_tool.func(booking_search_input)
+    
+    # Update the state with the structured output
+    state.accommodation = booking_results
+
+    # Return the updated state
+    return state
+
+
+
+#-------------------------------------------- Activity Planner Node --------------------------------------------
+
+def activities_node(state: OverallState) -> OverallState:
+    """
+    This node uses a React agent to find exciting activities and places for the user.
+    """
+    
+    def parse_activities_output(activities_output: str) -> List[Dict[str, any]]:
+        """
+        Parses the raw string output of activities into a list of dictionaries.
+        Each dictionary contains the title, description, and type of the activity.
+        """
+        # Split the output into individual activities
+        activities = re.split(r"\n\d+\.\s+", activities_output)  # Split by numbered list items
+        activities = [act.strip() for act in activities if act.strip()]  # Remove empty strings
+
+        # Parse each activity into a dictionary
+        parsed_activities = []
+        for activity in activities:
+            # Extract the title
+            title_match = re.match(r"^\*\*(.*?)\*\*", activity)
+            if title_match:
+                title = title_match.group(1).strip()
+
+                # Extract the description (everything after the title until "Type:")
+                description_match = re.search(r":\s*(.*?)\s*(?=Type:|$)", activity, re.DOTALL)
+                description = description_match.group(1).strip() if description_match else "No description provided."
+
+                # Extract the type (inside square brackets after "Type:")
+                type_match = re.search(r"Type:\s*\[(.*?)\]", activity)
+                if type_match:
+                    # Split the types by comma and strip quotes and whitespace
+                    activity_type = [t.strip().strip('"') for t in type_match.group(1).split(",")]
+                else:
+                    activity_type = []
+
+                # Add the parsed activity to the list
+                parsed_activities.append({
+                    "title": title,
+                    "description": description,
+                    "type": activity_type  # Now a clean list of strings
+                })
+
+        return parsed_activities
+
+    # Extract user preferences and query from the state
+    preferences = state.user_preferences
+    query = state.messages[-1].content if state.messages else "No query provided"  # Assume the last message is the user's query
+    destination = state.dest_code  # Extract the destination from the state
+    
+    # Format the user preferences into a readable string for the prompt
+    preferences_str = "\n".join([f"{key}: {value}" for key, value in preferences.items()])
+    
+    
+    # Create the React agent prompt
+    prompt = PromptTemplate.from_template(ACTIVITY_PLANNER_PROMPT)
+    
     # Create the React agent
-    react_agent = create_react_agent(
+    search_agent = create_react_agent(
         llm=llm,
-        prompt=react_agent_prompt,
-        tools=tools,
+        tools=[tavily_search_tool],
+        prompt=prompt
     )
 
     # Create the agent executor
     agent_executor = AgentExecutor(
-        agent=react_agent,
-        tools=tools,
-        verbose=True,
-        return_intermediate_steps=False,
-        handle_parsing_errors=True,
+        agent=search_agent,
+        tools=[tavily_search_tool],
+        verbose=False,
+        return_intermediate_steps=True,
+        handle_parsing_errors=True
     )
 
-    # Extract the user's query from the state
-    user_query = state.messages[-1].content if state.messages else "No query provided."
+    # Invoke the agent
+    result = agent_executor.invoke({
+        "input": f"Find exciting activities and places for the user in {query}.",
+        "preferences": preferences_str,
+        "query": query,
+        "agent_scratchpad": ""  # Initialize with an empty scratchpad
+    })
 
-    # Invoke the agent executor
-    try:
-        response = agent_executor.invoke({
-            "input": user_query,
-            "agent_scratchpad": "",  # Initialize with an empty scratchpad
-        })
+    # Extract the final answer from the result
+    activities_output = result.get("output", "")
+    
+    state.messages.append(AIMessage(content=activities_output))  # Append the AI's response to the state messages
+    
+    # Parse the activities_output string into a list of dictionaries
+    activities_list = parse_activities_output(activities_output)
 
-        # Parse the structured output
-        structured_output = json.loads(response["output"])  # Assuming the output is a JSON string
-        state.activities = structured_output["activities"]
-        print("Structured output:", structured_output)
-    except Exception as e:
-        # Handle errors gracefully
-        print(f"Error in activity_planner_node: {e}")
-        state.warnings = {"activity_planner_error": str(e)}
+    detailed_places_list = []
+    
+    for activity in activities_list:
+        # Search for places using the activity title and type
+        places_input = GoogleMapsPlacesInput(
+            query=activity["title"],  # Use the activity title as the query
+            location=destination,     # Use the destination from the state
+            radius=5000,              # Search within a 5km radius
+            type=activity["type"],    # Use the activity type
+            language="en",
+            min_price=0,
+            # max_price=4,
+            open_now=False
+        )
 
+        try:
+            results = google_places_tool.func(places_input)
+        except Exception as e:
+            print(f"Error calling Google Maps Places API: {e}")
+            results = {"places_search_result": {"status": "ZERO_RESULTS"}}  # Simulate no results if the API call fails
+        
+        # Initialize a list to store places for this activity
+        places_list = []
+        # Check if the search was successful and has results
+        if "places_search_result" in results:
+            if results["places_search_result"]["status"] == "ZERO_RESULTS":
+                # If no results are found, include the activity title with empty fields
+                place_details = {
+                    "name": activity["title"],  # Use the activity title as the name
+                    "description": activity["description"],
+                    "address": None,
+                    "rating": None,
+                    "photo": None
+                }
+                places_list.append(place_details)
+            else:
+                # If results are found, process them
+                places = results["places_search_result"]["results"]
+                
+                # Limit the results to 3 places per activity
+                for place in places[:3]:
+                    # Get the photo reference (if available)
+                    photo_reference = place.get("photos", [{}])[0].get("photo_reference") if place.get("photos") else None
+                    
+                    # Create a dictionary for the place
+                    place_details = {
+                        "name": place.get("name"),
+                        "address": place.get("formatted_address"),
+                        "rating": place.get("rating"),
+                        "photo": photo_reference
+                    }
+                
+                    # Append the place details to the list
+                    places_list.append(place_details)
+        
+        # Extend the detailed_places_list with the places_list
+        detailed_places_list.extend(places_list)     
+               
+    # Update the state with the detailed places list
+    state.activities = detailed_places_list
+    # Return the updated state
     return state
 
 
-#------------------------------------------------Real-Time Data Provider-------------------------------------------------------
-# Googles Places API
-# Google Maps API
-# Google Weather API
-# Recommends things yoiu should be watch out for:
-# Car Rental
-# Crime rate
-# Weather
-# Currency Exchange
-# Language
-# Timezone
-# Vaccination
-# Visa
-# Electricity
-# Emergency Number
-# Driving
-# Tipping
-# Dress Code
-# Food
-# Shopping
-# Public Holidays
-# Festivals
-# Events
-# Local Customs
-# Local Laws
-# Local Etiquette
-# Local Time
-# Local Business Hours
 
-def realtime_provider(state: OverallState) -> OverallState:
+#--------------------------------------------TicketMaster Node --------------------------------------------
+
+# Define the structured output class for the LLM
+class TicketmasterOutput(BaseModel):
+    location: str = Field(..., description="The city or region where the traveler is going (e.g., 'New York').")
+    start_date_time: str = Field(..., description="The start date and time for event search in ISO 8601 format (e.g., '2025-02-01T00:00:00Z').")
+    end_date_time: str = Field(..., description="The end date and time for event search in ISO 8601 format (e.g., '2025-02-28T23:59:59Z').")
+    keywords: List[str] = Field(..., description="A list of keywords representing exciting activities or events for the location (e.g., ['music', 'theater', 'tech']).")
+    country_code: str = Field(default="US", description="The country code for the location (e.g., 'US').")
+    size: int = Field(default=15, description="The number of events to retrieve per keyword.")
+    page: int = Field(default=1, description="The page number for pagination.")
+    sort: str = Field(default="relevance,desc", description="The sorting criteria for events.")
+
+# Define the Ticketmaster node
+def ticketmaster_node(state: OverallState) -> OverallState:
     """
-    Node to interact with the user, collect personal info, course info,
-    and submission document, and save it to the state.
+    This node extracts event details from the user's query in state.messages,
+    generates a list of keywords based on the location and preferences,
+    and searches for events using the Ticketmaster API.
     """
-    pass
+    llm_with_structure = llm.with_structured_output(TicketmasterOutput)
 
-
-#--------------------------------------------Itinerary Generator --------------------------------------------
-
-def itinerary_generator(state: OverallState) -> OverallState:
-    """
-    Node to interact with the user, collect personal info, course info,
-    and submission document, and save it to the state.
-    """
-    pass
-
-
-
-
-#--------------------------------------------personal_info_supervisor_node--------------------------------------------
-class PersonalInfoSupervisor:
-    """Class to handle the personal info supervisor node."""
-    class StudentInfo(BaseModel):
-        """Schema for the structured output containing student information."""
-        student_name: str = Field(description="The full name of the student.")
-        student_email: str = Field(description="The email address of the student.")
-        student_id: str = Field(description="The unique identifier for the student.")
-        course_number: str = Field(description="The course number or code.")
-        assignment_name: str = Field(description="The name of the assignment.")
-        file_path: str = Field(description="The file path to the submission document.")
-    
-    def __init__(self, llm: LangchainChatDeepSeek):
-        """
-        Initializes the PersonalInfoSupervisor with an LLM.
-        """
-        self.llm = llm if llm else LangchainChatDeepSeek(
-                                            api_key=os.getenv("DEEPSEEK_API_KEY"),
-                                            model= "deepseek-chat",
-                                            base_url="https://api.deepseek.com",
-                                        )
+    # Define the prompt template
+    prompt = PromptTemplate(
+        template="""
+        You are an advanced event assistant for TicketMaster, a company that sells and distributes tickets for live events. 
+        It's the world's largest ticket marketplace, offering tickets for concerts, sports games, theater shows, and more.
+        Your task is to extract event details from the traveler's destination in the traveler's query and generate a list of keywords 
+        representing exciting live events specifically tailored to the location they are visiting. The focus is solely on live events that 
+        can be sold via tickets, such as concerts, comedy, shows, theater, movies, Broadway, club, and similar. 
+        DO NOT include user preferences like museums, parks, or sightseeing. Use the following information to generate
+        a structured output for searching events:
         
-        self.prompt = self._create_prompt()
-        self.structured_llm = self.llm.with_structured_output(self.StudentInfo)
-    
-    def _create_prompt(self) -> ChatPromptTemplate:
-        """
-        Creates the prompt for the agent.
-        """
-        return ChatPromptTemplate.from_messages(
-            [
-                SystemMessage(content=SYSTEM_PROMPT),
-                MessagesPlaceholder(variable_name="messages"),
-            ]
+        ### Traveler Query:
+        {query}
+        
+        ### Instructions:
+        1. Extract the city or region where the traveler is going (e.g., "New York").
+           - If the traveler does not specify a location, use the city or city code provided in the state.
+        2. Extract the start and end dates for event search from the query.
+           - If the dates are not explicitly mentioned, use the default dates from the state.
+        3. Generate a list of **exciting** keywords representing live events for the location.
+           - Keywords should be specific to the destination's live event culture. 
+           - For example:
+                - New York: ["Broadway", "theater", "music", "comedy shows", "movies"]
+                - Los Angeles: ["music", "concerts", "movies", "comedy"]
+                - Nashville: ["country", "music", "concerts", "live", "shows", "music, "festivals"]
+           - Keywords must focus on ticketable live events and exclude non-ticketed activities or generic places.
+           - I would recommend from only 3 to 5 keywords, from the following categories:
+                - ["Broadway", "theater", "music", "comedy, shows", "movies", "concerts", "live", "festivals", "country"]
+        4. Use the default country code 'US' unless specified otherwise.
+        5. Return the structured output in the following format:
+           - location: The city or region.
+           - start_date_time: The start date and time in ISO 8601 format.
+           - end_date_time: The end date and time in ISO 8601 format.
+           - keywords: A list of keywords.
+           - country_code: The country code.
+           - size: The number of events to retrieve per keyword.
+           - page: The page number for pagination.
+           - sort: The sorting criteria for events.
+        ### Example Output:
+        - location: "New York"
+        - start_date_time: "2025-02-01T00:00:00Z"
+        - end_date_time: "2025-02-28T23:59:59Z"
+        - keywords: ["music", "theater", "movies"]
+        - country_code: "US"
+        - size: 15
+        - page: 1
+        - sort: "relevance,desc"
+        """,
+        input_variables=["query"]
+    )
+
+    # Create the chain
+    chain = prompt | llm_with_structure
+
+    # Extract the user's query from state.messages
+    query = state.messages[-1].content  # Assuming the last message is the user's query
+
+    # Invoke the chain to generate the structured output
+    structured_output = chain.invoke({"query": query})
+
+    # Initialize an empty list to store all event results
+    all_event_results = []
+
+    # Loop through each keyword and call the Ticketmaster API
+    for keyword in structured_output.keywords:
+        # Prepare the input for the Ticketmaster API
+        ticketmaster_input = TicketmasterEventSearchInput(
+            keyword=keyword,
+            city=structured_output.location,
+            country_code=structured_output.country_code,
+            start_date_time=structured_output.start_date_time,
+            end_date_time=structured_output.end_date_time,
+            size=structured_output.size,
+            page=structured_output.page,
+            sort=structured_output.sort
         )
-        
-        
+
+        # Call the Ticketmaster API
+        event_results = ticketmaster_tool.func(ticketmaster_input)
+        # Extend the all_event_results list with the results
+        all_event_results.extend(event_results)
+
+    # Update the state with the event results
+    state.live_events = all_event_results
+
+    # Return the updated state
+    return state
 
 
-def personal_info_supervisor_node(state: OverallState)-> OverallState:
+#---------------------------------------------------------- Recommendations Node --------------------------------------------
+# use weather_tool to get the weather forecast for the location
+# the use LLM to interpret the weather forecast,
+# and return the interpretation as a string
+
+def recommendations_node(state: OverallState) -> OverallState:
     """
-    Supervisor node to interact with the student, collect personal info, course info,
-    and submission document, and save it to the state.
+    This node uses a React agent to find crucial travel advice and insights for the user.
     """
-    try:
-        supervisor = PersonalInfoSupervisor(llm)
-        # Initialize the conversation if no messages exist
-        
-        if not state.messages:
-            state.messages = supervisor.prompt.messages  # Initialize with the system message
-        
-                # Check if the last message is from the user (HumanMessage)
-        if state.messages and isinstance(state.messages[-1], HumanMessage):
-            # Invoke the structured LLM with the current state
-            structured_output = supervisor.structured_llm.invoke(state.messages)
-            # Save the structured output to the state
-            state.student_name = structured_output.student_name
-            state.student_email = structured_output.student_email
-            state.student_id = structured_output.student_id
-            state.course_number = structured_output.course_number
-            state.assignment_name = structured_output.assignment_name
-            state.file_path = structured_output.file_path
-            # Append the structured output as a system message for feedback
-            state.messages.append(AIMessage(content=f"Thank you! Here's what I collected:\n{structured_output}"))
 
-        # Route to the next node (Grading or Complaint)
-        # return state
-    except Exception as e:
-        # Handle errors gracefully
-        state.messages = state.messages + [SystemMessage(content=f"An error occurred: {str(e)}")]
-        state.next_node = "__end__"  # End the workflow if an error occurs
-        # return state
-
-
-
-
-
-
-
-
-
-#--------------------------------------------Notification Node--------------------------------------------
-
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
-from typing import Dict, Any
-
-def notification_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Sends grades and feedback to the student via email.
-    Attaches the Excel report to the email.
-    """
-    try:
-        # Email configuration
-        sender_email = "grademaster@example.com"
-        sender_password = "your_email_password"
-        receiver_email = state["student_email"]
-        
-        # Create the email
-        msg = MIMEMultipart()
-        msg["From"] = sender_email
-        msg["To"] = receiver_email
-        msg["Subject"] = f"Grades and Feedback for {state['assignment_name']}"
-        
-        # Email body
-        body = f"""
-        Dear {state['student_name']},
-        
-        Please find attached your grades and feedback for the assignment: {state['assignment_name']}.
-        
-        Best regards,
-        GradeMaster Team
+    def extract_recommendations_3(output: str):
         """
-        msg.attach(MIMEText(body, "plain"))
+        Extracts a list of dictionaries from the provided string output.
+
+        Args:
+            output (str): The string containing travel recommendations.
+
+        Returns:
+            list[dict]: A list of dictionaries with the extracted recommendations.
+        """
+        # Define a regex pattern to capture the key-value pairs in the recommendations
+        pattern = r'\*\*\{"(.*?)": "(.*?)"\}\*\*'
         
-        # Attach the Excel report
-        with open(state["report_path"], "rb") as attachment:
-            part = MIMEBase("application", "octet-stream")
-            part.set_payload(attachment.read())
-        encoders.encode_base64(part)
-        part.add_header(
-            "Content-Disposition",
-            f"attachment; filename={os.path.basename(state['report_path'])}",
-        )
-        msg.attach(part)
+        # Find all matches using regex
+        matches = re.findall(pattern, output)
         
-        # Send the email
-        with smtplib.SMTP("smtp.example.com", 587) as server:
-            server.starttls()
-            server.login(sender_email, sender_password)
-            server.sendmail(sender_email, receiver_email, msg.as_string())
+        # Convert matches to a list of dictionaries
+        recommendations = [{key: value} for key, value in matches]
         
-        # Update the state
-        state["notification_sent"] = True
-        state["next_node"] = "__end__"
+        return recommendations
+
+
+    def extract_recommendations_1(output: str):
+        """
+        Extracts a list of dictionaries from the provided string output.
+
+        Args:
+            output (str): The string containing travel recommendations.
+
+        Returns:
+            list[dict]: A list of dictionaries with the extracted recommendations.
+        """
+        # Split the output into lines and look for the numbered recommendations
+        recommendations = []
+        lines = output.split("\n")
+
+        for line in lines:
+            # Match lines that start with a number followed by a period and a space
+            match = re.match(r"^(\d+)\.\s*\*\*(.*?)\*\*:\s*(.*)$", line)
+            if match:
+                number = match.group(1)  # The recommendation number (optional if needed)
+                key = match.group(2).strip()  # The key (e.g., "Crime Rate")
+                value = match.group(3).strip()  # The value (e.g., "New York City is generally safe...")
+                recommendations.append({key: value})
+
+        return recommendations
+
+
+    def extract_recommendations_2(output: str):
+        """
+        Extracts a list of dictionaries from the provided string output.
+
+        Args:
+            output (str): The string containing travel recommendations.
+
+        Returns:
+            list[dict]: A list of dictionaries with the extracted recommendations.
+        """
+        # Match JSON-like structure for recommendations in the output
+        recommendations = []
+
+        try:
+            # Attempt to load the output as JSON if it's already formatted that way
+            recommendations = json.loads(output)
+        except json.JSONDecodeError:
+            # Fallback to regex-based extraction for non-JSON outputs
+            lines = output.split("\n")
+
+            for line in lines:
+                # Match lines that start with a number followed by a period and a space
+                match = re.match(r"^\s*\{\s*\"(.*?)\"\s*:\s*\"(.*?)\"\s*\}\s*$", line)
+                if match:
+                    key = match.group(1).strip()  # Extract the key
+                    value = match.group(2).strip()  # Extract the value
+                    recommendations.append({key: value})
+
+        return recommendations
+
+    # Extract user preferences and query from the state
+    if not state.messages:
+        state.messages.append(AIMessage(content="Please provide a destination or query."))
         return state
-    except Exception as e:
-        state["feedback_comments"].append(f"Error during notification: {str(e)}")
-        state["next_node"] = "__end__"
-        return state
+
+    query = state.messages[0].content  
+    
+    # Create the React agent prompt
+    prompt = PromptTemplate.from_template(RECOMMENDATION_PROMPT)
+
+    # Create the React agent
+    search_agent = create_react_agent(
+        llm=llm,
+        tools=[tavily_search_tool, weather_tool],
+        prompt=prompt
+    )
+
+    # Create the agent executor
+    agent_executor = AgentExecutor(
+        agent=search_agent,
+        tools=[tavily_search_tool, weather_tool],
+        verbose=False,
+        return_intermediate_steps=True,
+        handle_parsing_errors=True
+    )
+
+    # Invoke the agent
+    result = agent_executor.invoke({
+        "input": f"Find exciting activities and places for the user in {query}.",
+        "query": query,
+        "agent_scratchpad": ""  # Initialize with an empty scratchpad
+    })
+
+    activities_output = result.get("output", "")
+    
+    # Try extract_recommendations_1 first
+    activities = extract_recommendations_1(activities_output)
+
+    # If no result, try extract_recommendations_2
+    if not activities:
+        activities = extract_recommendations_2(activities_output)
+
+    # If still no result, try extract_recommendations_3
+    if not activities:
+        activities = extract_recommendations_3(activities_output)
+
+    state.recommendations = activities
+    state.messages.append(AIMessage(content=activities_output))
+
+    return state
+
