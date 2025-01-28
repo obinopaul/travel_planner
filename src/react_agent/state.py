@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Sequence, Literal
 
 from langchain_core.messages import AnyMessage
 from langgraph.graph import add_messages
@@ -78,6 +78,8 @@ class OverallState:
     # User Preferences
     user_preferences: Dict[str, Any] = field(default_factory=dict)
     "Stores the user's input (e.g., destination, budget, dates)."
+    accommodation_options: Literal["hotel", "Airbnb"] = "hotel"
+    "The type of accommodation chosen by the user."
     
     # Agent Outputs
     flights: Optional[List[Dict[str, Any]]] = None

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Literal, cast
 from pydantic import BaseModel, Field
 from typing import Optional
+from dotenv import load_dotenv
 from datetime import date
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
@@ -19,6 +20,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import MessagesPlaceholder
 from langchain.agents import create_react_agent, AgentExecutor
 from langgraph.prebuilt import ToolNode
+from langchain_groq import ChatGroq
 from typing import Dict, List, Literal, Any
 import ipywidgets as widgets
 from IPython.display import display
@@ -33,14 +35,14 @@ from langchain.tools import BaseTool, Tool
 from langchain_core.runnables import Runnable
 from src.react_agent.configuration import Configuration
 from src.react_agent.state import InputState, OverallState, OutputState
-from src.react_agent.prompts import SYSTEM_PROMPT, ACTIVITY_PLANNER_PROMPT, FLIGHT_FINDER_PROMPT, RECOMMENDATION_PROMPT
+from src.react_agent.prompts import SYSTEM_PROMPT, ACTIVITY_PLANNER_PROMPT, FLIGHT_FINDER_PROMPT, RECOMMENDATION_PROMPT, RECOMMENDATION_PROMPT_2
 
 from src.react_agent.tools import (TOOLS, amadeus_tool, amadeus_hotel_tool, geoapify_tool, weather_tool, 
                                    googlemaps_tool, flight_tool, google_scholar_tool, booking_tool,
                                    google_places_tool,tavily_search_tool,
                                    flight_tools_condition, accomodation_tools_condition, activity_planner_tools_condition, 
                                    FlightSearchInput, AmadeusFlightSearchInput, BookingSearchInput, GoogleMapsPlacesInput,
-                                   TicketmasterEventSearchInput, ticketmaster_tool)
+                                   TicketmasterEventSearchInput, ticketmaster_tool, AirbnbSearchInput, airbnb_tool)
 
 from src.react_agent.utils import load_chat_model
 from langchain_core.tools import tool
@@ -49,12 +51,18 @@ from langchain_core.tools import tool
 
 #-----------------------------------------------LLM------------------------------------------------
 # Initialize the LLM
-llm = LangchainChatDeepSeek(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    model= "deepseek-chat",
-    base_url="https://api.deepseek.com",
-)
+# llm = LangchainChatDeepSeek(
+#     api_key=os.getenv("DEEPSEEK_API_KEY"),
+#     model= "deepseek-chat",
+#     base_url="https://api.deepseek.com",
+# )
+# Load environment variables from the .env file
+load_dotenv()
 
+llm = LangchainChatDeepSeek(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    model= "gpt-4o"
+)
 #-----------------------------------------------------------------------------------------------
 # Nodes and Agents
 #-----------------------------------------------------------------------------------------------
@@ -76,13 +84,7 @@ class TravelItinerary(BaseModel):
     
 def travel_itinerary_planner(state: OverallState) -> OverallState:
     # Define the LLM with structured output
-    
-    llm = LangchainChatDeepSeek(
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-        model= "deepseek-chat",
-        base_url="https://api.deepseek.com",
-        )
-    
+       
     # Define the LLM with structured output
     llm_with_structure_op = llm.with_structured_output(TravelItinerary)
     
@@ -216,7 +218,52 @@ def flight_finder_tool_node(state: OverallState) -> OverallState:
 
 #-------------------------------------------- Accommodation Finder --------------------------------------------
 
-# Define the structured output for the accommodation finder
+def accomodation_router(
+    state: OverallState, messages_key: str = "accommodation_options"
+) -> Literal["booking_com_node", "airbnb_node"]:
+    """
+    Determines the next step in the workflow based on the accommodation options.
+
+    Args:
+        state (OverallState): The state to evaluate.
+        messages_key (str): The key to check for accommodation options.
+
+    Returns:
+        Literal["booking_com_node", "airbnb_node"]: The next node to route to.
+    """
+    accommodation_options = getattr(state, messages_key, None)
+    if accommodation_options:
+        if accommodation_options == "hotel":
+            return "booking_com_node"
+        else:
+            return "airbnb_node"
+    else:
+        raise ValueError(f"Invalid state or missing key '{messages_key}': {state}")
+
+
+def accomodation_router_2(
+    state: OverallState, messages_key: str = "accommodation"
+) -> Literal["booking_com_node", "activities_node"]:
+    """
+    Determines the next step in the workflow based on the accommodation list.
+
+    Args:
+        state (OverallState): The state to evaluate.
+        messages_key (str): The key to check for accommodation information.
+
+    Returns:
+        Literal["booking_com_node", "activities"]: The next node to route to.
+    """
+    accommodation = getattr(state, messages_key, None)
+    if accommodation is not None:
+        if not accommodation:  # If the accommodation list is empty
+            return "booking_com_node"
+        else:
+            return "activities_node"
+    else:
+        raise ValueError(f"Invalid state or missing key '{messages_key}': {state}")
+
+
 class AccommodationOutput(BaseModel):
     location: str = Field(..., description="The exact location or neighborhood where the traveler wants to stay (e.g., 'Brooklyn').")
     checkin_date: str = Field(..., description="The check-in date in YYYY-MM-DD format.")
@@ -224,6 +271,80 @@ class AccommodationOutput(BaseModel):
     adults: int = Field(default=2, description="The number of adult guests.")
     rooms: int = Field(default=1, description="The number of rooms.")
     currency: str = Field(default="USD", description="The currency for the prices.")
+
+
+def airbnb_node(state: OverallState) -> OverallState:
+    """
+    This node extracts accommodation details from the user's query in state.messages
+    and returns a structured output that can be passed to the booking tool.
+    """
+    llm_with_structure = llm.with_structured_output(AccommodationOutput)
+
+    # Define the prompt template
+    prompt = PromptTemplate(
+        template="""
+        You are an advanced travel planner assistant. Your task is to extract accommodation details
+        from the traveler's query. Use the following information to generate a structured output for
+        booking accommodations:
+
+        ### Traveler Query:
+        {query}
+
+        ### Instructions:
+        1. Extract the exact location or neighborhood where the traveler wants to stay (e.g., "Brooklyn").
+           - If the traveler does not specify a location, use the city or city code provided in the state.
+        2. Extract the check-in and check-out dates from the query.
+           - If the dates are not explicitly mentioned, use the default dates from the state.
+        3. Extract the number of adults and rooms from the query.
+           - If not specified, use the default values: 1 adult and 1 room.
+        4. Use the default currency 'USD' unless specified otherwise.
+        5. Return the structured output in the following format:
+           - location: The exact location or neighborhood.
+           - checkin_date: The check-in date in YYYY-MM-DD format.
+           - checkout_date: The check-out date in YYYY-MM-DD format.
+           - adults: The number of adult guests.
+           - rooms: The number of rooms.
+           - currency: The currency for the prices.
+
+        ### Example Output:
+        - location: "Brooklyn"
+        - checkin_date: "2023-12-01"
+        - checkout_date: "2023-12-10"
+        - adults: 2
+        - rooms: 1
+        - currency: "USD"
+        """,
+        input_variables=["query"]
+    )
+
+    # Create the chain
+    chain = prompt | llm_with_structure
+
+    # Extract the user's query from state.messages
+    query = state.messages[-1].content  # Assuming the last message is the user's query
+
+    # Invoke the chain to generate the structured output
+    structured_output = chain.invoke({"query": query})
+
+    # Call Google Flights Search Tool        
+    booking_search_input = AirbnbSearchInput(
+        location=structured_output.location,
+        checkin_date=structured_output.checkin_date,
+        checkout_date=structured_output.checkout_date,
+        currency=structured_output.currency,
+        margin_km=5.0
+    )
+
+    airbnb_results = airbnb_tool.func(booking_search_input)
+    
+    # Update the state with the structured output
+    state.accommodation = airbnb_results
+
+    # Return the updated state
+    return state
+
+
+# Define the structured output for the accommodation finder
 
 def accommodation_finder_node(state: OverallState) -> OverallState:
     """
@@ -702,3 +823,101 @@ def recommendations_node(state: OverallState) -> OverallState:
 
     return state
 
+
+
+
+class Recommendations(BaseModel):
+    recommendations: Optional[List[Dict[str, str]]] = Field(description="The user's current location or starting point.")
+
+def recommendations_node_2(state: OverallState) -> OverallState:
+    import openai
+    
+    # If you haven't set up your API key globally, do so here:
+    # openai.api_key = "YOUR_OPENAI_API_KEY"
+    
+    client = openai  # or adapt to your environment if needed
+
+    # Combine all user messages into a single query
+    all_messages = "\n".join([message.content for message in state.messages])
+    preferences_text = "\n".join([f"{key}: {value}" for key, value in state.user_preferences.items()])
+    query = f"{all_messages}\n\nUser Preferences:\n{preferences_text}"
+
+    # Define the structured response format with a JSON Schema
+    completion = client.chat.completions.create(
+        model="gpt-4o",  # Replace with a valid model you have access to.
+        messages=[
+            {"role": "system", "content": RECOMMENDATION_PROMPT_2},
+            {"role": "user", "content": query},
+        ],
+        # The 'response_format' parameter needs 'json_schema' -> 'name' + 'schema'
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "recommendation_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "recommendations": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "key": {
+                                        "type": "string",
+                                        "description": "Short label for the recommendation"
+                                    },
+                                    "value": {
+                                        "type": "string",
+                                        "description": "Concise recommendation content"
+                                    }
+                                },
+                                "required": ["key", "value"],
+                                "additionalProperties": False
+                            },
+                            "description": "A list of travel recommendations."
+                        }
+                    },
+                    "required": ["recommendations"],
+                    "additionalProperties": False
+                }
+            },
+        },
+    )
+
+    # Parse and return the generated structured output
+    try:
+        structured_output = completion.choices[0].message.content
+        parsed_output = json.loads(structured_output)
+        recommendation_list = parsed_output["recommendations"]  # This is the list of dictionaries
+        transformed_list = [{item["key"]: item["value"]} for item in recommendation_list]
+        
+        state.recommendations = transformed_list
+        
+        return state 
+    
+    except Exception as e:
+        print(f"Error occurred: {e}")
+        return {"error": "Failed to generate recommendations."}
+
+
+def recommendation_router(
+    state: OverallState, messages_key: str = "recommendations"
+) -> Literal["recommendation_node_2", "__end__"]:
+    """
+    Determines the next step in the workflow based on the accommodation list.
+
+    Args:
+        state (OverallState): The state to evaluate.
+        messages_key (str): The key to check for accommodation information.
+
+    Returns:
+        Literal["booking_com_node", "activities"]: The next node to route to.
+    """
+    recommendation = getattr(state, messages_key, None)
+    if recommendation is not None:
+        if not recommendation: # If the accommodation list is empty
+            return "recommendation_node_2"
+        else:
+            return "__end__"
+    else:
+        raise ValueError(f"Invalid state or missing key '{messages_key}': {state}")

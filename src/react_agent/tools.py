@@ -16,6 +16,9 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from PyPDF2 import PdfWriter, PdfReader
+from geopy import Nominatim
+import math 
+
 import os
 from src.react_agent.configuration import Configuration
 from pdf2image import convert_from_path
@@ -36,6 +39,7 @@ from pydantic import BaseModel, Field, validator
 from langchain_community.document_loaders import NeedleLoader
 from langchain_community.retrievers import NeedleRetriever
 from datetime import datetime
+import pyairbnb
 
 # from crewai_tools import BaseTool
 from amadeus import Client, ResponseError
@@ -3461,4 +3465,122 @@ ticketmaster_tool = Tool(
     func=TicketmasterAPITool().search_events,
     description="Searches for events using the Eventbrite API.",
     args_schema=TicketmasterEventSearchInput,
+)
+
+
+#---------------------------------------------------------- AirBnB Tools ----------------------------------------------------------
+
+class AirbnbSearchInput(BaseModel):
+    location: str = Field(..., description="The destination city or area (e.g., 'Brooklyn' or 'New York City').")
+    checkin_date: str = Field(..., description="The check-in date in YYYY-MM-DD format.")
+    checkout_date: str = Field(..., description="The check-out date in YYYY-MM-DD format.")
+    currency: str = Field(default="USD", description="The currency for the prices.")
+    margin_km: float = Field(default=5.0, description="Size (in km) of bounding box margin.")
+    
+    # Optionally, add fields for the number of guests, rooms, or other filters, 
+    # depending on how you want to extend the logic.
+    # For this minimal version, we’ll keep it simple.
+
+class AirbnbScraperTool:
+    def __init__(self):
+        """
+        Initialize anything your tool needs.
+        In the original pyairbnb code, there's an internal `requests.Session`,
+        but we can keep it simple here.
+        """
+        pass
+
+    def _get_dynamic_bbox(self, location_name: str, margin_km: float):
+        """
+        Geocode to get lat/long, then build a bounding box around center.
+        """
+        geolocator = Nominatim(user_agent="airbnb_search")
+        geocode_result = geolocator.geocode(location_name)
+
+        if not geocode_result:
+            raise ValueError(f"Could not geocode location: {location_name}")
+
+        center_lat = geocode_result.latitude
+        center_lng = geocode_result.longitude
+
+        lat_margin_deg = margin_km / 111.0
+        lng_margin_deg = margin_km / (111.0 * abs(math.cos(math.radians(center_lat))) + 1e-9)
+
+        ne_lat = center_lat + lat_margin_deg
+        ne_lng = center_lng + lng_margin_deg
+        sw_lat = center_lat - lat_margin_deg
+        sw_lng = center_lng - lng_margin_deg
+        zoom_value = 10  # Adjust as needed
+
+        return ne_lat, ne_lng, sw_lat, sw_lng, zoom_value
+
+    def search(self, input_data: AirbnbSearchInput) -> List[Dict]:
+        """
+        Perform a search by dynamically constructing a bounding box around 'location',
+        using margin_km to determine how large the bounding box is.
+        
+        Args:
+            input_data (AirbnbSearchInput): user-provided location, check-in/check-out, etc.
+            
+        Returns:
+            List[Dict]: Each dict includes 'name', 'price', 'rating', 'link', etc.
+        """
+
+        # 1) Get bounding box + zoom for the location
+        ne_lat, ne_lng, sw_lat, sw_lng, zoom_val = self._get_dynamic_bbox(
+            input_data.location,
+            input_data.margin_km
+        )
+
+        # 2) Call pyairbnb.search_all
+        #    This function will paginate over all results within that bounding box.
+        #    (If you only want the first page, you could use search_first_page.)
+        # pyairbnb's "search_all" or "search_first_page" require bounding box + dates + currency
+        results = pyairbnb.search_all(
+            check_in=input_data.checkin_date,
+            check_out=input_data.checkout_date,
+            ne_lat=ne_lat,
+            ne_long=ne_lng,
+            sw_lat=sw_lat,
+            sw_long=sw_lng,
+            zoom_value=zoom_val,
+            currency=input_data.currency,
+            proxy_url=""  # or any proxy if you want
+        )
+
+        # `results` is already partially structured by pyairbnb. 
+        # Typically it contains fields like 'name', 'room_id', 'price', etc.
+        # We will further format each entry for clarity.
+        output = []
+        for item in results:
+            property_name = item.get("name", "N/A")
+            
+            # Extract the unit price (nightly) if available:
+            price_info = item.get("price", {})
+            unit_price = price_info.get("unit", {})
+            currency_symbol = unit_price.get("curency_symbol", "")
+            nightly_amount = unit_price.get("amount", "N/A")
+
+            # Basic rating
+            rating_info = item.get("rating", {})
+            rating_value = rating_info.get("value", "N/A")
+
+            # Construct a link from the room_id
+            room_id = item.get("room_id", "")
+            link = f"https://www.airbnb.com/rooms/{room_id}" if room_id else "N/A"
+
+            output.append({
+                "name": property_name,
+                "price_per_night": f"{currency_symbol}{nightly_amount}",
+                "rating": rating_value,
+                "link": link
+            })
+
+        return output
+
+airbnb_tool = Tool(
+    name="Airbnb Scraper",
+    func=AirbnbScraperTool().search,
+    description="Scrapes Airbnb listings based on location (city or borough) and check-in/check-out dates.",
+    args_schema=AirbnbSearchInput
 )

@@ -1,0 +1,10 @@
+langgchain
+langchain_core
+langchain_anthropic
+langchain_openai
+tavily_python
+langchain_community
+langgraph
+pyairbnb
+geopy
+dotenv
