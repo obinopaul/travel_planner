@@ -18,12 +18,12 @@ from typing import List, Optional, Dict, Any
 from PyPDF2 import PdfWriter, PdfReader
 from geopy import Nominatim
 import math 
+from dateutil.parser import parse as parse_datetime
+# Assuming fast_flights module is correctly installed and accessible
+from fast_flights import FlightData, Passengers, Result, get_flights
 
 import os
 from src.react_agent.configuration import Configuration
-from pdf2image import convert_from_path
-import pytesseract
-from langdetect import detect
 import re
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
@@ -1053,6 +1053,7 @@ flight_tool = Tool(
 )
 
 
+
 # # Example Usage
 # tool = GoogleFlightsSearchTool()
 # input_data = FlightSearchInput(
@@ -1075,6 +1076,176 @@ flight_tool = Tool(
 
 
 
+#-------------------------------------------------------------- Google Flights Scraper --------------------------------------------------------------
+
+class FlightSearchInput_2(BaseModel):
+    """
+    Input schema for searching flights.
+    """
+    departure_airport: str = Field(..., description="The departure airport code (e.g., LAX).")
+    arrival_airport: str = Field(..., description="The arrival airport code (e.g., NYC).")
+    departure_date: str = Field(..., description="The departure date in YYYY-MM-DD format.")
+    return_date: Optional[str] = Field(None, description="The return date in YYYY-MM-DD format (optional for one-way flights).")
+    adults: int = Field(default=1, description="The number of adults.")
+    children: int = Field(default=0, description="The number of children.")
+    travel_class: str = Field(default="all", description="The travel class (economy, business, first, or all).")
+    sort_by: str = Field(default="price", description="Sort results by (price, duration, departure, arrival).")
+
+
+class GoogleFlightsTool:
+    def __init__(self):
+        pass
+
+    def _filter_flights_by_class(self, flights: List[Dict], travel_class: str) -> List[Dict]:
+        """
+        Filter flights by travel class.
+        """
+        if travel_class == "all":
+            return flights
+        return [
+            flight for flight in flights 
+            if flight.get("travel_class", "economy").lower() == travel_class.lower()
+        ]
+
+    def _sort_flights(self, flights: List[Dict], sort_by: str) -> List[Dict]:
+        """
+        Sort flights by price, duration, departure, or arrival.
+        """
+        if sort_by == "price":
+            # Remove currency symbols and commas, then convert to float for sorting
+            return sorted(
+                flights, 
+                key=lambda x: float(x.get("price", "0").replace('$', '').replace(',', ''))
+            )
+        elif sort_by == "duration":
+            # Assuming duration is in format "X hr Y min"
+            def duration_in_minutes(flight):
+                parts = flight.get("duration", "0 hr 0 min").split()
+                hours = int(parts[0]) if len(parts) > 0 else 0
+                minutes = int(parts[2]) if len(parts) > 2 else 0
+                return hours * 60 + minutes
+            return sorted(flights, key=duration_in_minutes)
+        elif sort_by == "departure":
+            return sorted(
+                flights, 
+                key=lambda x: datetime.strptime(x.get("departure_time", ""), "%I:%M %p on %a, %b %d, %Y")
+            )
+        elif sort_by == "arrival":
+            return sorted(
+                flights, 
+                key=lambda x: datetime.strptime(x.get("arrival_time", ""), "%I:%M %p on %a, %b %d, %Y")
+            )
+        return flights
+
+    def _structure_flight_data(self, result: Result, from_airport: str, to_airport: str, year: int) -> List[Dict]:
+        """
+        Structure flight data into a list of dictionaries, including airport codes and year in time strings.
+        """
+        flights = []
+        for flight in result.flights:
+            flight_dict = {
+                "airline": flight.name,
+                "departure_time": f"{flight.departure}, {year}",
+                "arrival_time": f"{flight.arrival}, {year}",
+                "departure_airport": from_airport,
+                "arrival_airport": to_airport,
+                "duration": flight.duration,
+                "stops": flight.stops,
+                "price": flight.price,
+                "travel_class": getattr(flight, "seat", "economy"),  # Default to economy if seat not present
+            }
+            flights.append(flight_dict)
+        return flights
+
+    def search_flights(self, input: FlightSearchInput_2) -> List[Dict]:
+        """
+        Search for flights and return a list of dictionaries.
+        """
+        try:
+            structured_output = []
+
+            # Prepare Passengers object
+            passengers_obj = Passengers(
+                adults=input.adults,
+                children=input.children,
+                infants_in_seat=0,
+                infants_on_lap=0
+            )
+
+            # Extract year from departure_date
+            departure_year = int(input.departure_date.split('-')[0])
+
+            # --- Departure Flights ---
+            departure_flight_data = [
+                FlightData(
+                    date=input.departure_date,
+                    from_airport=input.departure_airport,
+                    to_airport=input.arrival_airport
+                )
+            ]
+
+            departure_result: Result = get_flights(
+                flight_data=departure_flight_data,
+                trip="one-way",
+                seat=input.travel_class if input.travel_class != "all" else "economy",  # Default to economy if "all"
+                passengers=passengers_obj,
+                fetch_mode="fallback",
+            )
+
+            departure_flights = self._structure_flight_data(
+                departure_result, 
+                from_airport=input.departure_airport, 
+                to_airport=input.arrival_airport,
+                year=departure_year
+            )
+            departure_flights = self._filter_flights_by_class(departure_flights, input.travel_class)
+            departure_flights = self._sort_flights(departure_flights, input.sort_by)
+
+            structured_output.append({"departure flights": departure_flights})
+
+            # --- Arrival Flights (if return_date is provided) ---
+            if input.return_date:
+                arrival_year = int(input.return_date.split('-')[0])
+                arrival_flight_data = [
+                    FlightData(
+                        date=input.return_date,
+                        from_airport=input.arrival_airport,
+                        to_airport=input.departure_airport
+                    )
+                ]
+
+                arrival_result: Result = get_flights(
+                    flight_data=arrival_flight_data,
+                    trip="one-way",
+                    seat=input.travel_class if input.travel_class != "all" else "economy",
+                    passengers=passengers_obj,
+                    fetch_mode="fallback",
+                )
+
+                arrival_flights = self._structure_flight_data(
+                    arrival_result, 
+                    from_airport=input.arrival_airport, 
+                    to_airport=input.departure_airport,
+                    year=arrival_year
+                )
+                arrival_flights = self._filter_flights_by_class(arrival_flights, input.travel_class)
+                arrival_flights = self._sort_flights(arrival_flights, input.sort_by)
+
+                structured_output.append({"arrival flights": arrival_flights})
+
+            return structured_output
+
+        except Exception as e:
+            # Always return a list of dictionaries, even in case of error
+            return [{"error": f"An error occurred: {str(e)}"}]
+
+# Initialize the tool
+google_flights_tool = Tool(
+    name="Flight Search",
+    func=GoogleFlightsTool().search_flights,
+    description="Provides flight information between two locations, including airlines, prices, departure/arrival times, and more.",
+    args_schema=FlightSearchInput_2
+)
 
 #----------------------------------------------------------------------------------------------------------------------------
 
@@ -3583,4 +3754,331 @@ airbnb_tool = Tool(
     func=AirbnbScraperTool().search,
     description="Scrapes Airbnb listings based on location (city or borough) and check-in/check-out dates.",
     args_schema=AirbnbSearchInput
+)
+
+#------------------------------------------------------- Arxive Tool----------------------------------------------------------
+import arxiv
+
+# Define the input schema
+class ArxivSearchInput(BaseModel):
+    query: str = Field(..., description="The search query for Arxiv.")
+    sort: str = Field(default="Relevance", description="Sort criterion: 'Relevance' or 'SubmittedDate'.")
+    max_results: int = Field(default=5, description="Maximum number of search results to return.")
+
+
+# Define the Tool
+class ArxivSearchTool:
+    def __init__(self):
+        self.arxiv = arxiv
+
+    def search_papers(self, query: str, sort: str = "Relevance", max_results: int = 5):
+        import requests  # Import inside the function
+        import arxiv  # Ensure arxiv is accessible within the function
+
+        assert sort in ["Relevance", "SubmittedDate"], "Invalid sort criterion. Choose 'Relevance' or 'SubmittedDate'."
+        sort_criterion = (
+            self.arxiv.SortCriterion.SubmittedDate if sort == "SubmittedDate" else self.arxiv.SortCriterion.Relevance
+        )
+
+        try:
+            search = self.arxiv.Search(query=query, max_results=max_results, sort_by=sort_criterion)
+            arxiv_gen = list(self.arxiv.Client().results(search))
+
+            search_result = [
+                {
+                    "title": result.title,
+                    "href": result.pdf_url,
+                    "body": result.summary,
+                }
+                for result in arxiv_gen
+            ]
+
+            return search_result if search_result else "No papers found matching the criteria."
+
+        except requests.exceptions.HTTPError as e:
+            return f"An error occurred while searching Arxiv: {str(e)}"
+        except Exception as e:
+            return f"An unexpected error occurred: {str(e)}"
+
+
+# Instantiate the LangChain tool
+arxiv_search_tool = Tool(
+    name="Arxiv Paper Search",
+    func=ArxivSearchTool().search_papers,
+    description="Searches for academic papers on Arxiv based on a query string.",
+    args_schema=ArxivSearchInput
+)
+
+
+#------------------------------------------------------- Google Search Tool----------------------------------------------------------
+
+# Define the input schema
+class GoogleSearchInput(BaseModel):
+    query: str = Field(..., description="The search query for Google.")
+    max_results: int = Field(default=7, description="Maximum number of search results to return.")
+
+
+# Define the Tool
+class GoogleSearchTool:
+    def __init__(self):
+        import os  # Import inside the class
+        self.api_key = os.getenv("GOOGLE_API_KEY")
+        self.cx_key = os.getenv("GOOGLE_CX_KEY")
+
+        if not self.api_key:
+            raise ValueError(
+                "Google API key not found. Set the GOOGLE_API_KEY environment variable."
+            )
+        if not self.cx_key:
+            raise ValueError(
+                "Google CX key not found. Set the GOOGLE_CX_KEY environment variable."
+            )
+
+    def search(self, query: str, max_results: int = 7):
+        import requests  # Import inside the function
+        import json  # Import inside the function
+
+        """Performs a Google search using the API and returns structured results."""
+        print(f"Searching Google for: {query}...")
+
+        url = f"https://www.googleapis.com/customsearch/v1?key={self.api_key}&cx={self.cx_key}&q={query}&start=1"
+        resp = requests.get(url)
+
+        if resp.status_code < 200 or resp.status_code >= 300:
+            return f"Google search: unexpected response status: {resp.status_code}"
+
+        try:
+            search_results = json.loads(resp.text)
+        except Exception:
+            return "Failed to parse search results."
+
+        results = search_results.get("items", [])
+        search_results = []
+
+        for result in results:
+            if "youtube.com" in result["link"]:  # Skip YouTube results
+                continue
+            try:
+                search_results.append(
+                    {
+                        "title": result["title"],
+                        "href": result["link"],
+                        "body": result["snippet"],
+                    }
+                )
+            except:
+                continue
+
+        return search_results[:max_results] if search_results else "No results found."
+
+
+# Instantiate the LangChain tool
+google_search_tool = Tool(
+    name="Google Search",
+    func=GoogleSearchTool().search,
+    description="Performs a Google search using the Custom Search API and returns relevant links and snippets.",
+    args_schema=GoogleSearchInput
+)
+
+
+#------------------------------------------------------- PubMed Search Tool----------------------------------------------------------
+# Define the input schema
+class PubMedSearchInput(BaseModel):
+    query: str = Field(..., description="The search query for PubMed Central.")
+    max_results: int = Field(default=10, description="Maximum number of search results to return.")
+
+
+# Define the Tool
+class PubMedSearchTool:
+    def __init__(self):
+        import os  # Import inside the class
+        self.api_key = os.getenv("NCBI_API_KEY")
+
+        if not self.api_key:
+            raise ValueError(
+                "NCBI API key not found. Set the NCBI_API_KEY environment variable."
+            )
+
+    def search(self, query: str, max_results: int = 10):
+        import requests  # Import inside the function
+        import xml.etree.ElementTree as ET  # Import inside the function
+
+        """Performs a PubMed Central search using the API and returns structured results."""
+        base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+        params = {
+            "db": "pmc",
+            "term": f"{query} AND free fulltext[filter]",
+            "retmax": max_results,
+            "usehistory": "y",
+            "api_key": self.api_key,
+            "retmode": "json",
+            "sort": "relevance"
+        }
+        response = requests.get(base_url, params=params)
+
+        if response.status_code != 200:
+            return f"Failed to retrieve data: {response.status_code} - {response.text}"
+
+        results = response.json()
+        ids = results["esearchresult"].get("idlist", [])
+
+        search_response = []
+        for article_id in ids:
+            xml_content = self.fetch([article_id])
+            if self.has_body_content(xml_content):
+                article_data = self.parse_xml(xml_content)
+                if article_data:
+                    search_response.append(
+                        {
+                            "href": f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{article_id}/",
+                            "body": f"{article_data['title']}\n\n{article_data['abstract']}\n\n{article_data['body'][:500]}...",
+                        }
+                    )
+
+            if len(search_response) >= max_results:
+                break
+
+        return search_response if search_response else "No articles found."
+
+    def fetch(self, ids):
+        import requests  # Import inside the function
+
+        """Fetches the full text content for given article IDs."""
+        base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+        params = {
+            "db": "pmc",
+            "id": ",".join(ids),
+            "retmode": "xml",
+            "api_key": self.api_key,
+        }
+        response = requests.get(base_url, params=params)
+
+        if response.status_code != 200:
+            return f"Failed to retrieve data: {response.status_code} - {response.text}"
+
+        return response.text
+
+    def has_body_content(self, xml_content):
+        import xml.etree.ElementTree as ET  # Import inside the function
+
+        """Checks if the XML content has a body section."""
+        root = ET.fromstring(xml_content)
+        ns = {
+            "mml": "http://www.w3.org/1998/Math/MathML",
+            "xlink": "http://www.w3.org/1999/xlink",
+        }
+        article = root.find("article", ns)
+        if article is None:
+            return False
+
+        body_elem = article.find(".//body", namespaces=ns)
+        if body_elem is not None:
+            return True
+        else:
+            for sec in article.findall(".//sec", namespaces=ns):
+                for p in sec.findall(".//p", namespaces=ns):
+                    if p.text:
+                        return True
+        return False
+
+    def parse_xml(self, xml_content):
+        import xml.etree.ElementTree as ET  # Import inside the function
+
+        """Parses the XML content to extract title, abstract, and body."""
+        root = ET.fromstring(xml_content)
+        ns = {
+            "mml": "http://www.w3.org/1998/Math/MathML",
+            "xlink": "http://www.w3.org/1999/xlink",
+        }
+
+        article = root.find("article", ns)
+        if article is None:
+            return None
+
+        title = article.findtext(
+            ".//title-group/article-title", default="", namespaces=ns
+        )
+
+        abstract = article.find(".//abstract", namespaces=ns)
+        abstract_text = (
+            "".join(abstract.itertext()).strip() if abstract is not None else ""
+        )
+
+        body = []
+        body_elem = article.find(".//body", namespaces=ns)
+        if body_elem is not None:
+            for p in body_elem.findall(".//p", namespaces=ns):
+                if p.text:
+                    body.append(p.text.strip())
+        else:
+            for sec in article.findall(".//sec", namespaces=ns):
+                for p in sec.findall(".//p", namespaces=ns):
+                    if p.text:
+                        body.append(p.text.strip())
+
+        return {"title": title, "abstract": abstract_text, "body": "\n".join(body)}
+
+
+# Instantiate the LangChain tool
+pubmed_search_tool = Tool(
+    name="PubMed Central Search",
+    func=PubMedSearchTool().search,
+    description="Searches for academic articles on PubMed Central and retrieves structured results.",
+    args_schema=PubMedSearchInput
+)
+
+
+#-------------------------------------------------------- Semantic Scholar Tool----------------------------------------------------------
+
+# Define the input schema
+class SemanticScholarSearchInput(BaseModel):
+    query: str = Field(..., description="The search query for Semantic Scholar.")
+    sort: str = Field(default="relevance", description="Sort criterion: 'relevance', 'citationCount', or 'publicationDate'.")
+    max_results: int = Field(default=20, description="Maximum number of search results to return.")
+
+
+# Define the Tool
+class SemanticScholarSearchTool:
+    def __init__(self):
+        self.BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+        self.VALID_SORT_CRITERIA = ["relevance", "citationCount", "publicationDate"]
+
+    def search(self, query: str, sort: str = "relevance", max_results: int = 20):
+        import requests  # Import inside the function
+
+        """Performs a search on Semantic Scholar and returns structured results."""
+        assert sort in self.VALID_SORT_CRITERIA, "Invalid sort criterion. Choose 'relevance', 'citationCount', or 'publicationDate'."
+        
+        params = {
+            "query": query,
+            "limit": max_results,
+            "fields": "title,abstract,url,venue,year,authors,isOpenAccess,openAccessPdf",
+            "sort": sort.lower(),
+        }
+
+        try:
+            response = requests.get(self.BASE_URL, params=params)
+            response.raise_for_status()
+        except requests.RequestException as e:
+            return f"An error occurred while accessing Semantic Scholar API: {e}"
+
+        results = response.json().get("data", [])
+        search_result = [
+            {
+                "title": result.get("title", "No Title"),
+                "href": result["openAccessPdf"].get("url", "No URL") if result.get("isOpenAccess") and result.get("openAccessPdf") else "No Open Access PDF",
+                "body": result.get("abstract", "Abstract not available"),
+            }
+            for result in results
+        ]
+
+        return search_result if search_result else "No papers found matching the criteria."
+
+
+# Instantiate the LangChain tool
+semantic_scholar_search_tool = Tool(
+    name="Semantic Scholar Search",
+    func=SemanticScholarSearchTool().search,
+    description="Searches for academic papers on Semantic Scholar and retrieves structured results.",
+    args_schema=SemanticScholarSearchInput
 )

@@ -70,15 +70,15 @@ class OverallState:
     "The number of adults traveling."
     num_children: Optional[int] = None
     "The number of children traveling."
-    num_rooms: Optional[int] = None
-    "The number of rooms required for accommodation."
     travel_class: Optional[int] = None  # Add this line
-    "The travel class chosen by the user (1: Economy, 2: Premium Economy, 3: Business, 4: First)."
+    "The travel class chosen by the user (0: None, 1: Economy, 2: Premium Economy, 3: Business, 4: First)."
+    sort_by: Optional[str] = None
+    "The sorting criteria of flight chosen by the user (e.g., price, duration, departure, arrival)."
     
     # User Preferences
     user_preferences: Dict[str, Any] = field(default_factory=dict)
     "Stores the user's input (e.g., destination, budget, dates)."
-    accommodation_options: Literal["hotel", "Airbnb"] = "hotel"
+    accommodation_options: Literal["Hotel", "Airbnb"] = "Hotel"
     "The type of accommodation chosen by the user."
     
     # Agent Outputs

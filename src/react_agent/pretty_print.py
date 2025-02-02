@@ -160,80 +160,146 @@ def pretty_print_output(output):
     # ---------------------------------------------------------------------
     # 1. Flights
     # ---------------------------------------------------------------------
+
     
     if 'flights' in output and output['flights']:
         print("\n========================== FLIGHTS ==========================\n")
         
-        # Each item in output['flights'] might be one route or set of flight results
-        for idx, flight_set in enumerate(output['flights']):
-            print(f"Flight Option #{idx+1}\n")
-            
-            # The classes we might have
-            travel_classes = ["Economy", "Premium Economy", "Business", "First"]
-            
-            for tclass in travel_classes:
-                if tclass not in flight_set:
-                    continue  # skip if that class doesn't exist in the data
-                
-                class_data = flight_set[tclass]
-                best = class_data.get('best_flights', [])
-                other = class_data.get('other_flights', [])
-                
-                # Decide which list to use
-                # If best is non-empty, use best. Otherwise use other.
-                relevant_flights = best if best else other
-                if not relevant_flights:
-                    continue
-                
-                # Sort by price ascending
-                relevant_flights.sort(key=lambda f: f.get('price', 9999999))
-                
-                # Take up to 3
-                relevant_flights = relevant_flights[:5]
-                
-                # Prepare table rows
-                rows = []
-                for i, fdata in enumerate(relevant_flights, start=1):
-                    airlines_str = ", ".join(fdata.get('airlines', []))
-                    price_str = f"${fdata.get('price','')}"
-                    route_str = f"{fdata.get('departure_airport','')} -> {fdata.get('arrival_airport','')}"
-                    times_str = f"{fdata.get('departure_time','')} -> {fdata.get('arrival_time','')}"
-                    duration_str = format_duration(fdata.get('total_duration', ''))
+        # Check if the flight data is from the new node (has 'departure flights' and 'arrival flights')
+        is_new_node = isinstance(output['flights'], list) and len(output['flights']) > 0 and 'departure flights' in output['flights'][0]
+        
+        # Define the max number of flights to display per class
+        max_flights_per_class = 10
+        
+        if is_new_node:
+            # Handle the new node structure
+            for flight_set in output['flights']:
+                def print_flight_table(title, flights):
+                    """
+                    Prints a formatted table for a given flight category.
+                    """
+                    if not flights:
+                        return
                     
-                    layovers = fdata.get('layovers', [])
-                    layover_count = len(layovers)
+                    # Organize flights by travel class
+                    categorized_flights = {"Economy": [], "Business": [], "First": []}
                     
-                    carbon_str = f"{fdata.get('carbon_emissions', '')} kg" if fdata.get('carbon_emissions') else ""
+                    for flight in flights:
+                        travel_class = flight.get('travel_class', 'Economy')  # Default to Economy
+                        categorized_flights.setdefault(travel_class, []).append(flight)
                     
-                    # For an actual booking link, you might have a real URL or token. 
-                    # If 'booking_token' is not None, you could generate a link. Example:
-                    # booking_link = your_link_builder_function(fdata['booking_token'])
-                    # For now, we'll just store the token if it exists.
-                    token = fdata.get('booking_token', None)
-                    if token:
-                        booking_str = embed_link("Book Here", f"{token}")
-                    else:
-                        booking_str = "N/A"
-                    
-                    rows.append([
-                        str(i),
-                        airlines_str,
-                        price_str,
-                        route_str,
-                        times_str,
-                        duration_str,
-                        str(layover_count),
-                        tclass,
-                        booking_str
-                    ])
+                    # Print separate tables for each class
+                    for class_name, class_flights in categorized_flights.items():
+                        if class_flights:
+                            print(f"\n--- {title} ({class_name} Class) ---\n")
+                            rows = []
+                            for i, flight in enumerate(class_flights[:max_flights_per_class], start=1):
+                                airline = flight.get('airline', '')
+                                departure_time = flight.get('departure_time', '')
+                                arrival_time = flight.get('arrival_time', '')
+                                departure_airport = flight.get('departure_airport', '')
+                                arrival_airport = flight.get('arrival_airport', '')
+                                duration = flight.get('duration', '')
+                                stops = flight.get('stops', '')
+                                price = flight.get('price', '')
+                                booking_link = embed_link("Book", flight.get('booking_url', '')) if flight.get('booking_url') else "N/A"
+                                
+                                rows.append([
+                                    str(i),
+                                    airline,
+                                    departure_time,
+                                    arrival_time,
+                                    f"{departure_airport} -> {arrival_airport}",
+                                    duration,
+                                    str(stops),
+                                    price,
+                                    booking_link
+                                ])
+                            
+                            # Build the table
+                            headers = ["#", "Airline", "Departure", "Arrival", "Route", "Duration", "Stops", "Price", "Booking"]
+                            table_str = ascii_table(headers, rows)
+                            print(table_str)
+
+                # Print Departure Flights
+                if 'departure flights' in flight_set and flight_set['departure flights']:
+                    print_flight_table("DEPARTURE FLIGHTS", flight_set['departure flights'])
+
+                # Print Arrival Flights
+                if 'arrival flights' in flight_set and flight_set['arrival flights']:
+                    print_flight_table("ARRIVAL FLIGHTS", flight_set['arrival flights'])
+        else:
+            # Handle the old node structure
+            for idx, flight_set in enumerate(output['flights']):
+                print(f"Flight Option #{idx+1}\n")
                 
-                # Build the table
-                headers = ["#", "Airlines", "Price", "Route", "Times", 
-                           "Duration", "Layovers", "Class", "Booking"]
-                table_str = ascii_table(headers, rows, title=f"--- {tclass.upper()} ---")
-                print(table_str)
-                print()
+                # The classes we might have
+                travel_classes = ["Economy", "Premium Economy", "Business", "First"]
+                
+                for tclass in travel_classes:
+                    if tclass not in flight_set:
+                        continue  # skip if that class doesn't exist in the data
+                    
+                    class_data = flight_set[tclass]
+                    best = class_data.get('best_flights', [])
+                    other = class_data.get('other_flights', [])
+                    
+                    # Decide which list to use
+                    # If best is non-empty, use best. Otherwise use other.
+                    relevant_flights = best if best else other
+                    if not relevant_flights:
+                        continue
+                    
+                    # Sort by price ascending
+                    relevant_flights.sort(key=lambda f: f.get('price', 9999999))
+                    
+                    # Take up to 3
+                    relevant_flights = relevant_flights[:5]
+                    
+                    # Prepare table rows
+                    rows = []
+                    for i, fdata in enumerate(relevant_flights, start=1):
+                        airlines_str = ", ".join(fdata.get('airlines', []))
+                        price_str = f"${fdata.get('price','')}"
+                        route_str = f"{fdata.get('departure_airport','')} -> {fdata.get('arrival_airport','')}"
+                        times_str = f"{fdata.get('departure_time','')} -> {fdata.get('arrival_time','')}"
+                        duration_str = format_duration(fdata.get('total_duration', ''))
+                        
+                        layovers = fdata.get('layovers', [])
+                        layover_count = len(layovers)
+                        
+                        carbon_str = f"{fdata.get('carbon_emissions', '')} kg" if fdata.get('carbon_emissions') else ""
+                        
+                        # For an actual booking link, you might have a real URL or token. 
+                        # If 'booking_token' is not None, you could generate a link. Example:
+                        # booking_link = your_link_builder_function(fdata['booking_token'])
+                        # For now, we'll just store the token if it exists.
+                        token = fdata.get('booking_token', None)
+                        if token:
+                            booking_str = embed_link("Book Here", f"{token}")
+                        else:
+                            booking_str = "N/A"
+                        
+                        rows.append([
+                            str(i),
+                            airlines_str,
+                            price_str,
+                            route_str,
+                            times_str,
+                            duration_str,
+                            str(layover_count),
+                            tclass,
+                            booking_str
+                        ])
+                    
+                    # Build the table
+                    headers = ["#", "Airlines", "Price", "Route", "Times", 
+                               "Duration", "Layovers", "Class", "Booking"]
+                    table_str = ascii_table(headers, rows, title=f"--- {tclass.upper()} ---")
+                    print(table_str)
+                    print()
     
+  
     # ---------------------------------------------------------------------
     # 2. Accommodation
     # ---------------------------------------------------------------------
@@ -302,34 +368,47 @@ def pretty_print_output(output):
     
     if 'live_events' in output and output['live_events']:
         print("\n======================== LIVE EVENTS =======================\n")
-        
+
         # Sort events by parsed date/time
         live_events = sorted(output['live_events'], key=parse_event_datetime)
-        
+
+        def truncate_event_name(name, word_limit=7):
+            """
+            Truncates the event name to the first `word_limit` words.
+            If the name is short, it remains unchanged.
+            """
+            words = name.split()
+            if len(words) > word_limit:
+                return " ".join(words[:word_limit]) + "..."
+            return name
+
         rows = []
         for i, evt in enumerate(live_events, start=1):
             event_name = evt.get('Event', '')
+            truncated_event_name = truncate_event_name(event_name)  # Truncate name
+
             date = evt.get('Date', '')
             time = evt.get('Time', '')
             venue = evt.get('Venue', '')
             url = evt.get('Url', None)
-            
+
             link_str = embed_link("View Event", url) if url else "N/A"
-            
+
             # Skip city/country as requested
             rows.append([
                 str(i),
-                event_name,
+                truncated_event_name,
                 date,
                 time,
                 venue,
                 link_str
             ])
-        
+
         headers = ["#", "Event", "Date", "Time", "Venue", "Link"]
         table_str = ascii_table(headers, rows, title="UPCOMING LIVE EVENTS")
         print(table_str)
         print()
+        
     
     
     # ---------------------------------------------------------------------

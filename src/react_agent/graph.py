@@ -23,8 +23,8 @@ from langgraph.prebuilt import tools_condition
 from src.react_agent.prompts import SYSTEM_PROMPT, FLIGHT_FINDER_PROMPT, ACTIVITY_PLANNER_PROMPT
 
 from src.react_agent.agent import ( travel_itinerary_planner, flight_finder_tool_node,airbnb_node,
-                                accommodation_finder_node, activities_node, ticketmaster_node, recommendations_node,
-                                accomodation_router, accomodation_router_2, recommendations_node_2, recommendation_router)
+                                accommodation_finder_node, activities_node, ticketmaster_node, recommendations_node, flight_finder_node,
+                                accomodation_router, accomodation_router_2, flights_router, recommendations_node_2, recommendation_router)
 
 from src.react_agent.tools import (TOOLS, amadeus_tool, amadeus_hotel_tool, geoapify_tool, weather_tool,  AmadeusFlightSearchInput,
                                    FlightSearchInput,
@@ -36,6 +36,7 @@ from src.react_agent.tools import (TOOLS, amadeus_tool, amadeus_hotel_tool, geoa
 from langchain_core.runnables.graph import CurveStyle, MermaidDrawMethod, NodeStyles
 from datetime import date
 import logging
+import datetime
 
 # Suppress debug messages from ipywidgets
 logging.getLogger('ipywidgets').setLevel(logging.WARNING)
@@ -56,9 +57,10 @@ warnings.filterwarnings("ignore")
 
 # Define a new graph
 # ----------------------------------------- Nodes ---------------------------------------------------
-builder = StateGraph(OverallState, config_schema=Configuration)
+builder = StateGraph(OverallState, input = InputState, config_schema=Configuration)
 builder.add_node("interface", travel_itinerary_planner)
 builder.add_node("flight_node", flight_finder_tool_node)
+builder.add_node("flight_node_1", flight_finder_node)
 builder.add_node("booking_com_node", accommodation_finder_node)
 builder.add_node("airbnb_node", airbnb_node)
 builder.add_node("activities_node", activities_node)
@@ -73,6 +75,11 @@ builder.add_edge("interface", "flight_node")
 
 builder.add_conditional_edges(
     "flight_node",
+    flights_router,
+)
+
+builder.add_conditional_edges(
+    "flight_node_1",
     accomodation_router,
 )
 builder.add_conditional_edges(
